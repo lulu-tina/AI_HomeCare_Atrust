@@ -7,3 +7,6 @@ __pycache__/
 osrm_motorcycle/data/
 output_results/
 .streamlit/secrets.toml
+
+AI_HomeCare_Agency/
+careflow-prev/
