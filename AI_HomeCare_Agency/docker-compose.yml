@@ -1,0 +1,23 @@
+# 啟動：docker compose up -d --build     （未在實機測試過，第一次請先在辦公室電腦試跑）
+services:
+  careflow:
+    build: .
+    restart: unless-stopped
+    environment:
+      CAREFLOW_OSRM_MOTORCYCLE_HOST: "http://host.docker.internal:5001"   # 改成你現在使用的 OSRM 網址
+      # GOOGLE_MAPS_API_KEY: "..."                          # 大眾運輸用；建議放 .env，不要寫進檔案
+    volumes:
+      - careflow_data:/app/output_results
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    expose: ["8501"]
+  caddy:                      # 對外只開 443：自動 HTTPS＋帳密。若只走 Tailscale/VPN 可刪除這段並改成 ports: ["8501:8501"]
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["443:443", "80:80"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [careflow]
+volumes:
+  careflow_data:
+  caddy_data:

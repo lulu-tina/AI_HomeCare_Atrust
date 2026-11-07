@@ -1,0 +1,7 @@
+# 把 careflow.example.org 換成你的網域；密碼雜湊用：docker run --rm caddy:2 caddy hash-password
+careflow.example.org {
+    basicauth {
+        supervisor  PASTE_HASH_HERE
+    }
+    reverse_proxy careflow:8501
+}
