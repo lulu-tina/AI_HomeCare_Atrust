@@ -56,6 +56,9 @@ from dispatch_message import parse_dispatch_message, redact_message
 from temp_case import slots_to_frame, build_temp_tasks, search_slots, single_caregiver_plan
 from eligibility import explain_slot, screen_caregivers, client_profile, simulate_worker, month_overtime_summary, worker_status_table
 from source_fields import source_primary_map, normalize_clients
+import audit_log
+import data_retention
+data_retention.run_daily()   # 每天第一次開啟時刪除逾期自動存檔與路段快取（一天最多一次）
 from agency_rules import payroll_tables, primary_guard, leave_overlap, consecutive_workdays_error
 from osrm_client import ensure_ready
 from schedule_output import build_schedule_output, schedule_excel_bytes, MAIN_COLUMNS
@@ -681,6 +684,8 @@ try:
                 _new_bytes = agency_file.getvalue()
                 if _stored_now is None or _stored_now['bytes'] != _new_bytes or _stored_now['name'] != agency_file.name:
                     st.session_state['_agency_upload'] = {'name': agency_file.name, 'bytes': _new_bytes}
+                    # 稽核只記檔案雜湊與大小，不記檔名（檔名可能含姓名）。
+                    audit_log.record('import', file_sha256=hashlib.sha256(_new_bytes).hexdigest(), size_bytes=len(_new_bytes))
         agency_source=_stored_workbook() or (local_file if _has_default else None)
         if agency_source is None:
             try:
@@ -786,6 +791,7 @@ with _sidebar_privacy.expander("🔒 個資顯示設定", expanded=False):
         "畫面顯示遮罩姓名＋ID",
         key="show_identity_names",
         disabled=not have_names,
+        on_change=lambda: st.session_state.get('show_identity_names') and audit_log.record('reveal_names'),
         help="已載入姓名對照時預設開啟，方便辨識案家與居服員；可隨時關閉。",
     ) and have_names
     _export_names = (
@@ -804,6 +810,17 @@ with _sidebar_privacy.expander("🔒 個資顯示設定", expanded=False):
             f"姓名對照已隔離並遮罩：{len(_client_names)} 個案、{len(_caregiver_names)} 位居服員。"
             "畫面可顯示遮罩姓名；匯出仍可選擇代碼版或遮罩姓名版。"
         )
+
+with _sidebar_privacy.expander("🧾 存取稽核紀錄", expanded=False):
+    st.caption('匯入、開啟姓名、覆寫、請假、匯出、資料刪除都會記錄；只記 ID 與筆數，不記姓名與地址。'
+               '紀錄只能附加，每筆帶前一筆的雜湊，可檢查有沒有被改過。')
+    if st.button('檢查並顯示最近 50 筆', key='audit_show', width='stretch'):
+        _audit_state = audit_log.verify()
+        if _audit_state['ok']:
+            st.success(f"共 {_audit_state['count']} 筆，雜湊鏈完整。")
+        else:
+            st.error(f"第 {_audit_state['first_bad_seq']} 筆起雜湊不一致，紀錄可能被修改，請通報機構負責人。")
+        st.dataframe(audit_log.as_table(50), hide_index=True, width='stretch')
 
 # 僅在資料來源變更時（首次載入／換檔案／原檔被覆寫）重設編輯區，避免使用者的編輯內容被覆蓋
 
@@ -2538,6 +2555,12 @@ if "last_result" in st.session_state:
             render_dashboard(_dashboard, caregiver_label, client_label)
         except Exception as exc:
             st.warning('儀錶板暫時無法產生，其他班表功能不受影響。原因：' + str(exc))
+        try:
+            from dashboard_view import render_pilot_kpis
+            render_pilot_kpis(df_tasks, _effective_for_kpi, df_route_result, monthly_payroll,
+                              config.client_primary_map, load_override_log())
+        except Exception as exc:
+            st.warning('試辦 KPI 暫時無法產生，其他班表功能不受影響。原因：' + str(exc))
 
         subhead('居服員工時與薪資')
         with st.expander('每日與每月工資估算', expanded=False):
@@ -4715,6 +4738,8 @@ if "last_result" in st.session_state:
             st.caption('Excel 含逐段交通與薪資工作表，檔案較大；需要時再產生（約十數秒），產生後可重複下載。')
             if st.button('📦 產生服務班表 Excel', key='build_schedule_excel'):
                 with st.spinner('正在產生 Excel…'):
+                    audit_log.record('export', kind='服務班表 Excel', rows=int(len(df_final)),
+                                     identity_mode=str(st.session_state.get('export_identity_mode', '代碼版')))
                     res['_excel_cache'] = (_excel_key, schedule_excel_bytes(
                         export_frame(df_final), export_frame(daily_payroll), export_frame(monthly_payroll), config.client_primary_map,
                         pd.DataFrame([d for d in df_matches.attrs.get('matching_diagnostics', []) if d['任務ID'] not in set(_operational_assignments['任務ID'])])))
@@ -4778,6 +4803,7 @@ if "last_result" in st.session_state:
             if st.button('📦 產生更新後的機構 Excel', key='build_source_update'):
                 try:
                     with st.spinner('寫回固定人選、備援與時段調整…'):
+                        audit_log.record('export', kind='更新機構 Excel')
                         st.session_state['_source_update_cache'] = (_key, update_source_workbook(
                             _agency_bytes, _owners, _weekly or None, _backups or None))
                 except Exception as exc:

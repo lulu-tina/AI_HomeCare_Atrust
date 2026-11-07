@@ -21,6 +21,7 @@ from caregiver_engine import SPECIAL_CERT_REQUIREMENTS, WEEKDAY_NAME_TO_NUM, WEE
 CATEGORY_RULES = [
     ('證照', ('缺特殊訓練', '缺乏該需求類別之法定專長認證', '長照服務人員證明已到期')),
     ('性別', ('性別不符',)),
+    ('不適合配對', ('不適合配對',)),
     ('體力', ('重度移位',)),
     ('環境', ('排斥',)),
     ('排班日', ('當日不排班', '可排班星期', '星期')),

@@ -42,10 +42,16 @@ def normalize_clients(frame, worker_ids=None):
 def source_primary_map(clients, worker_ids=None, fallback=None):
     result = dict(fallback or {})
     clients = normalize_clients(clients, worker_ids)
+    from caregiver_engine import unsuitable_caregivers
     for _, row in clients.iterrows():
+        client = identifier(row['案家ID'])
+        blocked = unsuitable_caregivers(row.get('不適合居服員'))
         owner = identifier(row.get('歷史首選居服員ID'))
-        if owner:
-            result[identifier(row['案家ID'])] = owner
+        if owner and owner not in blocked:
+            result[client] = owner
+        elif result.get(client) in blocked:
+            # 居督已登錄「不適合」：不能再當主責，交由排班重新提出主責。
+            result.pop(client, None)
     return result
 
 

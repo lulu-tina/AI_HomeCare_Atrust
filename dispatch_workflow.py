@@ -117,6 +117,11 @@ class WorkflowStore:
                 if not db.execute('SELECT 1 FROM blocks WHERE scope=? AND cg=? AND start=? AND end=? AND reason=?',data).fetchone():
                     db.execute('INSERT INTO blocks(scope,cg,start,end,reason) VALUES(?,?,?,?,?)',data)
             db.execute('INSERT INTO history(scope,task,at,body) VALUES(?,?,?,?)',(self.scope,'availability',stamp(),json.dumps({'cg':cg,'spans':[(str(a),str(b)) for a,b in merged],'reason':reason},ensure_ascii=False)))
+        try:
+            import audit_log
+            audit_log.record('leave', caregiver=str(cg), day=str(day), spans=len(merged), reason=reason.strip())
+        except Exception:
+            pass
     def remove_block(self, block_id):
         with self.connect() as db:
             row=db.execute('SELECT cg,start,end,reason FROM blocks WHERE scope=? AND id=?',(self.scope,block_id)).fetchone()

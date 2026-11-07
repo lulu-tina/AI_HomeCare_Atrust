@@ -107,15 +107,19 @@ def osrm_only_patches():
             patch.object(e, 'prefetch_google_transit_pairs', lambda *a, **k: None)]
 
 
-def run(excel, start, end, overrides):
+def run(excel, start, end, overrides, caregiver_hook=None, client_hook=None):
     cfg = base_config(overrides)
     t0 = time.perf_counter()
     x = e.load_agency_workbook(str(excel), start, end, daily_start='08:00', daily_end='21:00',
                                daily_cap=cfg.max_daily_hours, availability_confirmed=True, biweekly_anchor_confirmed=True)
     cg = x['Caregiver_Profiles'].copy()
     cg['臨時不可排時段'] = '[]'
+    if caregiver_hook is not None:   # 測試用：例如登錄臨時請假
+        cg = caregiver_hook(cg)
     ids = set(cg['居服員ID'].astype(str))
     cl = normalize_clients(x['Client_Profiles'].copy(), ids)
+    if client_hook is not None:      # 測試用：例如加上不適合居服員
+        cl = client_hook(cl, cfg)
     tasks = x['Tasks'].copy()
     tasks['使用Service_code重算'] = False
     tasks = e.apply_service_duration(tasks, x['Service_Code'].copy())
@@ -153,7 +157,8 @@ def run(excel, start, end, overrides):
     extra = {'load_seconds': round(load_seconds, 2), 'metrics_seconds': round(time.perf_counter() - t2, 2),
              'caregivers': len(cg), 'clients': int(tasks['案家ID'].nunique()),
              'idle_caregivers': metrics.pop('_idle'), 'unknown_transition_days': metrics.pop('_unknown_days'),
-             'dispatch_stats': r.get('dispatch_stats', {}), 'travel_legs': dash['travel_stats']}
+             'dispatch_stats': r.get('dispatch_stats', {}), 'travel_legs': dash['travel_stats'],
+             'frames': {'tasks': tasks, 'assigned': assigned, 'routes': routes, 'monthly_pay': monthly_pay}}
     return cfg, metrics, extra
 
 
@@ -301,6 +306,7 @@ def main():
         p.start()
     try:
         cfg, metrics, extra = run(excel, args.start, args.end, overrides)
+        extra.pop('frames', None)
     finally:
         for p in patches:
             p.stop()

@@ -142,3 +142,48 @@ def _render_demand_heat(st, D):
         st.caption('最紅的時段：' + '、'.join(one(p) for p in peaks)
                    + '。這些時段建議多排幾位上班（或安排備援待命）；顏色淺的時段人力較寬鬆，可以把可挪動的服務移過去。')
     st.caption('需求含已派與未派的全部服務；服務跨小時會按重疊分鐘拆開。「可上班」依居服員休息日與每日可服務時段計算，不含個別請假。')
+
+
+def render_pilot_kpis(tasks, assignments, routes, monthly_payroll, primary_map, override_log):
+    """試辦 KPI：每項指標顯示分子、分母、測量期間、基準值、目標值。"""
+    from kpi_metrics import KPI_SPECS, compute_pilot_kpis, load_baseline, save_baseline
+    st.subheader('🎯 試辦 KPI（分子／分母／期間／基準值）')
+    st.caption('定義見 PILOT_KPI.md。系統量測不到的兩項（排班作業耗時、居服員滿意度）由居督登錄；'
+               '基準值請填人工排班時期的實測值，沒有填就顯示空白，不自行假設。')
+    with st.expander('登錄人工量測值與基準值', expanded=False):
+        a, b, c = st.columns(3)
+        minutes = a.number_input('本期排班作業耗時（分鐘）', min_value=0, value=0, step=10, key='kpi_k2_minutes',
+                                 help='從匯入 Excel 到匯出最終班表，居督實際花的作業時間。0＝尚未登錄。')
+        score_sum = b.number_input('滿意度問卷分數總和', min_value=0.0, value=0.0, step=1.0, key='kpi_k8_sum')
+        people = c.number_input('回覆問卷人數', min_value=0, value=0, step=1, key='kpi_k8_people')
+        baseline = load_baseline()
+        frame = pd.DataFrame([{'代碼': s.code, '指標': s.name,
+                               '基準值': (baseline.get(s.code) or {}).get('value'),
+                               '目標值': (baseline.get(s.code) or {}).get('target'),
+                               '基準期間': (baseline.get(s.code) or {}).get('period', '')} for s in KPI_SPECS])
+        edited = st.data_editor(frame, hide_index=True, width='stretch', key='kpi_baseline_editor',
+                                disabled=['代碼', '指標'])
+        if st.button('保存基準值與目標值', key='kpi_baseline_save'):
+            out = {}
+            for row in edited.to_dict('records'):
+                item = {k: row[v] for k, v in (('value', '基準值'), ('target', '目標值'), ('period', '基準期間'))
+                        if row.get(v) is not None and not (isinstance(row.get(v), float) and pd.isna(row.get(v))) and row.get(v) != ''}
+                if item:
+                    out[row['代碼']] = item
+            save_baseline(out)
+            st.success('已保存，下次開啟會沿用。')
+            baseline = out
+    manual = {}
+    if minutes:
+        manual['K2'] = {'numerator': minutes}
+    if people:
+        manual['K8'] = {'numerator': score_sum, 'denominator': people}
+    table = compute_pilot_kpis(tasks, assignments, routes=routes, monthly_payroll=monthly_payroll,
+                               primary_map=primary_map, override_log=override_log,
+                               baseline=baseline, manual=manual)
+    st.dataframe(table, hide_index=True, width='stretch', column_config={
+        '定義': st.column_config.TextColumn('定義', width='large'),
+        '資料來源': st.column_config.TextColumn('資料來源', width='medium')})
+    st.download_button('下載試辦 KPI 表 CSV', table.to_csv(index=False).encode('utf-8-sig'),
+                       '試辦KPI.csv', 'text/csv', key='kpi_download')
+    return table

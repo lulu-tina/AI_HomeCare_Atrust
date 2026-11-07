@@ -1660,6 +1660,18 @@ def parse_time(time_str):
         datetime.strptime(parts[1].strip(), "%H:%M"),
     )
 
+UNSUITABLE_COLUMN = '不適合居服員'
+
+
+def unsuitable_caregivers(value):
+    """「不適合居服員」欄位 → 員工編號集合；可用 、 , ， / 空白 分隔。"""
+    import re as _re
+    text = _text(value)
+    if not text:
+        return set()
+    return {part for part in (p.strip() for p in _re.split(r'[、,，/／;；\s]+', text)) if part}
+
+
 def _check_hard_constraints(
     task,
     cg,
@@ -1731,6 +1743,10 @@ def _check_hard_constraints(
         return "案家指定女性居服員，性別不符"
     if req_gender in ("男", "限男性") and cg["性別"] != "男":
         return "案家指定男性居服員，性別不符"
+    # 人際適配：個案資料「不適合居服員」由居督登錄（案家拒絕、相處不合、曾有申訴等），
+    # 屬硬性條件，系統不會再派；原因只寫在居督的紀錄，不進排班資料。
+    if _text(cg.get('居服員ID')) in unsuitable_caregivers(task.get('不適合居服員')):
+        return "案家與此居服員不適合配對（居督登錄）"
 
     if task.get("需重度移位協助(0/1)") == 1 and cg.get("具備重度移位體力(0/1)") != 1:
         return "案家需重度移位協助，不具備相關體力條件"
@@ -4396,6 +4412,12 @@ def save_override_log(
     )
     write_header = not os.path.exists(log_path)
     entry.to_csv(log_path, mode="a", header=write_header, index=False, encoding="utf-8-sig")
+    try:
+        import audit_log
+        audit_log.record('override', task_id=str(task_id), client_id=str(client_id),
+                         ai_caregiver=str(ai_cg_id), supervisor_caregiver=str(supervisor_cg_id), reason=str(reason))
+    except Exception:
+        pass
 
 def load_override_log(log_path: str = OVERRIDE_LOG_PATH) -> pd.DataFrame:
     """讀取現有稽覈日誌；檔案不存在時回傳空的標準欄位 DataFrame。"""
