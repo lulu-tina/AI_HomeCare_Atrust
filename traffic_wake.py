@@ -84,7 +84,7 @@ def friendly_error(message):
     if 'OSRM' not in text and '機車路網' not in text:
         return None
     return ('交通主機目前沒有回應，所以這次沒有排班（系統不會用直線距離亂估）。'
-            '請按下方「🔔 喚醒交通主機」，等顯示「✅ 可以排班」後再按一次「開始排班」。'
+            '請等交通主機燈號變成 🟢（或按「再試一次」／「🔔 喚醒交通主機」），再按一次「開始排班」。'
             '如果等超過 5 分鐘仍叫不醒，請通知工程師檢查 Render 服務是否暫停。')
 
 
@@ -106,8 +106,9 @@ def panel(host, key, compact=False, light=False):
     def body():
         info = status(host)
         state = info['status']
-        if waking and state != 'waking':
-            st.rerun()          # 喚醒結束：整頁更新一次，停止每 3 秒的自動刷新
+        # 注意：這裡不可以呼叫整頁 st.rerun()。按「開始排班」後主程式還在跑，若這個每 3 秒自動更新的小區塊
+        # 在主機醒來時要求整頁重跑，會把正在進行的排班中斷、畫面回到起始頁（看起來像卡在「建立案家固定人選…」）。
+        # 小區塊自己每 3 秒更新就看得到最新燈號；下次有任何操作整頁重跑時，自動更新就會停掉。
         if light:
             st.caption(light_label(state))
             if state == 'failed' and st.button('🔄 再試一次', key=f'osrm_wake_{key}', width='stretch'):

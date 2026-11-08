@@ -1385,9 +1385,25 @@ if _module == M_SCHEDULE:
                 if _advanced:
                     with st.expander('技術細節（給工程師）'):
                         st.code(st.session_state.get('_schedule_osrm_detail', ''))
+            if not traffic_wake.is_ready(_osrm_host):
+                st.caption('ℹ️ 交通主機是免費雲端主機，閒置約 15 分鐘會睡著，叫醒要 1～3 分鐘。現在按「開始排班」也可以，'
+                           '系統會先等主機開好再自動開始，畫面會顯示已等幾秒。')
             if st.button('開始排班 · 全期間', type='primary', width='stretch', key='run_full_period'):
                 st.session_state.pop('_schedule_osrm_error', None)
                 st.session_state.pop('_schedule_osrm_detail', None)
+                if not traffic_wake.is_ready(_osrm_host):
+                    # 主機還沒醒：先等它開好再排（以前直接開始排，卡在第一筆交通查詢、畫面看起來像當掉）
+                    import time as _time
+                    traffic_wake.start(_osrm_host)
+                    _wait_box, _t0 = st.empty(), _time.time()
+                    while traffic_wake.status(_osrm_host)['status'] == 'waking' and _time.time() - _t0 < traffic_wake.WAKE_DEADLINE + 10:
+                        _wait_box.info(f'⏳ 交通主機開機中，已等 {int(_time.time() - _t0)} 秒（通常 1～3 分鐘）。開好會自動開始排班，請不要關閉網頁。')
+                        _time.sleep(2)
+                    _wait_box.empty()
+                    if traffic_wake.status(_osrm_host)['status'] == 'failed':
+                        st.session_state['_schedule_osrm_error'] = traffic_wake.friendly_error('OSRM 機車路網沒有回應')
+                        st.session_state['_schedule_osrm_detail'] = traffic_wake.status(_osrm_host).get('message', '')
+                        st.rerun()
                 begin_travel_query_run(google_query_limit)
                 df_cg = attach_blocks(st.session_state['edit_cg'], _workflow_store)
                 df_cl = st.session_state['edit_cl'].copy()

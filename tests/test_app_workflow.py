@@ -15,6 +15,8 @@ def test_full_month_save_and_next_month_reuse(tmp_path, monkeypatch):
     monkeypatch.setenv('CAREFLOW_AUTH', 'off')
     monkeypatch.setenv('CAREFLOW_AGENCY_DIR', str(tmp_path))
     monkeypatch.setattr(engine, 'calc_travel_minutes', lambda *a, **k: 5.0)
+    import traffic_wake
+    monkeypatch.setattr(traffic_wake, 'is_ready', lambda host: True)   # 測試不等真的交通主機開機
     monkeypatch.setattr(engine, 'prefetch_osrm_travel_times', lambda *a, **k: None)
     monkeypatch.setattr(engine, 'prefetch_google_transit_pairs', lambda *a, **k: None)
     import monthly_scheduler

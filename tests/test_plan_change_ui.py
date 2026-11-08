@@ -19,6 +19,8 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setenv('CAREFLOW_CHECKIN_AUTOSTART', '0')                          # 測試不要真的開 8600 埠
     monkeypatch.setenv('CAREFLOW_AUTH', 'off')                                     # 這些測試專注排班流程；登入另有測試
     monkeypatch.setattr(engine, 'calc_travel_minutes', lambda *a, **k: 5.0)
+    import traffic_wake
+    monkeypatch.setattr(traffic_wake, 'is_ready', lambda host: True)   # 測試不等真的交通主機開機
     monkeypatch.setattr(engine, 'prefetch_osrm_travel_times', lambda *a, **k: None)
     monkeypatch.setattr(engine, 'prefetch_google_transit_pairs', lambda *a, **k: None)
     import monthly_scheduler
