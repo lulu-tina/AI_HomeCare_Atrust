@@ -27,6 +27,15 @@ EVENTS = {
     'override': '居督覆寫系統建議',
     'leave': '登錄請假／不可排時間',
     'qualification_recheck': '照顧需求變更／資格重新檢核',
+    'plan_change': '週計畫異動（生效日起改時段）',
+    'checkin_publish': '發布班表到打卡網頁',
+    'checkin_pins': '產生／重設居服員打卡 PIN',
+    'checkin_url': '設定打卡網址',
+    'checkin_device': '核准／拒絕／解除居服員打卡手機',
+    'undo': '復原上一步',
+    'login': '登入',
+    'login_failed': '登入失敗',
+    'account': '帳號管理（新增、停用、重設密碼）',
     'retention_purge': '依保存期限刪除資料',
     'settings': '系統設定變更',
 }
@@ -72,6 +81,14 @@ def _digest(prev_hash, at, account, event, detail_json):
 
 
 def current_account():
+    """目前登入的帳號（每位使用者各自的連線）；沒有登入時退回環境變數。"""
+    try:
+        import streamlit as st
+        user = st.session_state.get('auth_user')
+        if user:
+            return user['username']
+    except Exception:
+        pass
     return os.getenv('CAREFLOW_OPERATOR', 'supervisor')
 
 

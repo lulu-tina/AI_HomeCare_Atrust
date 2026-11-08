@@ -5,3 +5,9 @@ careflow.example.org {
     }
     reverse_proxy careflow:8501
 }
+
+# 居服員打卡網頁：手機用，不加帳密（居服員用員工編號＋PIN 登入）。Caddy 會自動申請 https 憑證，手機才會給定位。
+# 把 checkin.example.org 換成你的網域，並在 DNS 加一筆指到這台主機。
+checkin.example.org {
+    reverse_proxy careflow:8600
+}

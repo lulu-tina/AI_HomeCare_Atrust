@@ -64,6 +64,56 @@ from osrm_client import ensure_ready
 from schedule_output import build_schedule_output, schedule_excel_bytes, MAIN_COLUMNS
 from dispatch_workflow import WorkflowStore, attach_blocks, blocked_reason, render_leave
 from substitute_rank import RULE_TEXT as SUBSTITUTE_RULE_TEXT
+import plan_versions as _pv
+import attendance_reconcile as _att
+from error_log import log_error as _log_error, session_errors as _session_errors, log_file as _error_log_file
+import undo_stack as _undo
+
+
+def _undo_click():
+    """按鈕回呼（畫面重跑前執行）：回到上一步，請假紀錄一併還原。"""
+    try:
+        from dispatch_workflow import WorkflowStore as _WS
+        note = _undo.undo(st.session_state, _WS(globals().get('institution_key', '中化')))
+        if note:
+            st.session_state['_undo_notice'] = note
+            import audit_log as _al
+            _al.record('undo', step=note)
+    except Exception as exc:
+        _log_error('復原上一步', exc)
+from checkin import store as _checkin_store
+from checkin import runner as _checkin_runner
+
+
+def _fresh_module(module):
+    """打卡模組的檔案更新後自動改用新版：Streamlit 重新整理只會重讀 app.py，子資料夾的模組會沿用舊的。"""
+    import importlib
+    import os as _os
+    try:
+        mtime = _os.path.getmtime(module.__file__)
+    except (OSError, TypeError, AttributeError):
+        return module
+    if getattr(module, '_careflow_mtime', mtime) != mtime:
+        module = importlib.reload(module)
+    module._careflow_mtime = mtime
+    return module
+
+
+_checkin_store = _fresh_module(_checkin_store)
+_checkin_runner = _fresh_module(_checkin_runner)
+
+
+@_guard_st.cache_resource(show_spinner=False)
+def _start_checkin_once():
+    """居督不必另外雙擊 start_checkin.bat：CareFlow 開著，居服員就能打卡。"""
+    try:
+        return _checkin_runner.ensure_running()
+    except Exception as exc:      # 打卡網頁啟動失敗不影響排班
+        _log_error('啟動打卡網頁', exc)
+        return False, str(exc)
+
+
+_start_checkin_once()
 from issue_center import unassigned_issues, assigned_overlaps, transition_issues, issue_summary, GROUP_NAMES as ISSUE_GROUP_NAMES
 
 
@@ -328,7 +378,7 @@ try:
     # 「載入示範案例」與換頁保存設定會先寫入 session 再畫元件；關掉 Streamlit 的重複設定提醒，避免畫面多出黃色警告。
     from streamlit import config as _st_config
     _st_config.set_option('global.disableWidgetStateDuplicationWarning', True)
-except Exception:
+except Exception:   # 正常情況（沒有設定檔／舊版不支援），不記錄
     pass
 from careflow_ui import (render_brand, section_title, render_summary, chips, flow_cards, file_status,
                          MODULES, MODULE_KEYS, module_label, module_header, module_nav_buttons, subhead,
@@ -354,7 +404,7 @@ _configured_osrm = os.getenv('CAREFLOW_OSRM_MOTORCYCLE_HOST')
 if not _configured_osrm:
     try:
         _configured_osrm = st.secrets.get('CAREFLOW_OSRM_MOTORCYCLE_HOST')
-    except Exception:
+    except Exception:   # 正常情況（沒有設定檔／舊版不支援），不記錄
         _configured_osrm = None
 _configured_remote = bool(_configured_osrm) and _osrm_is_remote(str(_configured_osrm))
 _configured_local = bool(_configured_osrm) and not _configured_remote
@@ -409,6 +459,114 @@ def _module_badge(key):
     return None
 
 
+# ---------- 登入與權限：主管（全部＋帳號管理＋05）、居督（01～04）。CAREFLOW_AUTH=off 可關閉（開發／測試用） ----------
+import auth as _auth
+
+
+def _render_login():
+    """沒登入時只顯示登入畫面；第一次使用（沒有任何帳號）時請建立第一個主管帳號。"""
+    _l, _c, _r = st.columns([1, 1.3, 1])
+    with _c:
+        st.markdown('### 🌿 CareFlow 智慧居服排班')
+        if not _auth.has_users():
+            st.info('第一次使用：請建立第一個**主管**帳號。之後主管可以在左側「帳號管理」替居督開帳號。')
+            with st.form('auth_setup'):
+                _u = st.text_input('帳號（英文或數字）', key='setup_user')
+                _n = st.text_input('姓名', key='setup_name')
+                _p1 = st.text_input(f'密碼（至少 {_auth.MIN_LENGTH} 個字）', type='password', key='setup_pw1')
+                _p2 = st.text_input('再輸入一次密碼', type='password', key='setup_pw2')
+                if st.form_submit_button('建立主管帳號並登入', type='primary', width='stretch'):
+                    try:
+                        if _p1 != _p2:
+                            raise ValueError('兩次輸入的密碼不一樣。')
+                        _auth.create_user(_u, _n, _auth.MANAGER, _p1)
+                        st.session_state['auth_user'] = _auth.verify(_u, _p1)[1]
+                        audit_log.record('account', action='create_first_manager', target=_auth._norm(_u))
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+        else:
+            with st.form('auth_login'):
+                _u = st.text_input('帳號', key='login_user')
+                _p = st.text_input('密碼', type='password', key='login_pw')
+                if st.form_submit_button('登入', type='primary', width='stretch'):
+                    _ok, _who = _auth.verify(_u, _p)
+                    if _ok:
+                        st.session_state['auth_user'] = _who
+                        audit_log.record('login', account=_who['username'])
+                        st.rerun()
+                    audit_log.record('login_failed', account=_auth._norm(_u) or '(空白)')
+                    st.error(_who)
+            st.caption('忘記密碼或被鎖定，請主管在「帳號管理」重設。重新整理網頁後需要再登入一次，排班進度會自動還原。')
+    st.stop()
+
+
+if _auth.enabled() and not st.session_state.get('auth_user'):
+    _render_login()
+_user = st.session_state.get('auth_user') or {'username': 'local', 'name': '本機使用', 'role': _auth.MANAGER}
+_is_manager = _user['role'] == _auth.MANAGER
+
+
+def _account_panel():
+    """側邊欄：登出、變更自己的密碼；主管另外可以管理帳號。"""
+    st.caption(f"👤 {_user['name']}（{_user['role']}）")
+    _a1, _a2 = st.columns(2)
+    if _a1.button('登出', key='auth_logout', width='stretch'):
+        st.session_state.pop('auth_user', None)
+        st.rerun()
+    with _a2.popover('改密碼', width='stretch'):
+        _old = st.text_input('目前密碼', type='password', key='pw_old')
+        _new = st.text_input(f'新密碼（至少 {_auth.MIN_LENGTH} 字）', type='password', key='pw_new')
+        if st.button('更新密碼', key='pw_save'):
+            try:
+                if not _auth.verify(_user['username'], _old)[0]:
+                    raise ValueError('目前密碼不正確。')
+                _auth.set_password(_user['username'], _new)
+                st.success('密碼已更新。')
+            except ValueError as exc:
+                st.error(str(exc))
+    if not _is_manager:
+        return
+    with st.expander('👥 帳號管理（主管）'):
+        _list = _auth.users()
+        st.dataframe(pd.DataFrame([{'帳號': u['username'], '姓名': u['name'], '角色': u['role'],
+                                    '狀態': '停用' if not u['active'] else ('鎖定中' if u['locked_until'] > __import__('time').time() else '正常'),
+                                    '最後登入': (u['last_login'] or '')[:16].replace('T', ' ')} for u in _list]),
+                     hide_index=True, width='stretch')
+        st.markdown('**新增帳號**')
+        _nu = st.text_input('帳號', key='acct_new_user')
+        _nn = st.text_input('姓名', key='acct_new_name')
+        _nr = st.radio('角色', _auth.ROLES, index=1, horizontal=True, key='acct_new_role')
+        _np = st.text_input('初始密碼（請對方登入後自己改）', type='password', key='acct_new_pw')
+        if st.button('新增', key='acct_add'):
+            try:
+                _auth.create_user(_nu, _nn, _nr, _np)
+                audit_log.record('account', action='create', target=_auth._norm(_nu), role=_nr)
+                st.success(f'已新增 {_nn}（{_nr}）。')
+            except ValueError as exc:
+                st.error(str(exc))
+        st.markdown('**重設密碼／停用**')
+        _who = st.selectbox('帳號', [u['username'] for u in _list], key='acct_pick',
+                            format_func=lambda n: next(f"{u['name']}（{u['username']}・{u['role']}）" for u in _list if u['username'] == n))
+        _rp = st.text_input('新密碼', type='password', key='acct_reset_pw')
+        _r1, _r2 = st.columns(2)
+        if _r1.button('重設密碼', key='acct_reset', width='stretch'):
+            try:
+                _auth.set_password(_who, _rp)
+                audit_log.record('account', action='reset_password', target=_who)
+                st.success('已重設，也解除鎖定。')
+            except ValueError as exc:
+                st.error(str(exc))
+        _active = next((u['active'] for u in _list if u['username'] == _who), 1)
+        if _r2.button('停用' if _active else '重新啟用', key='acct_toggle', width='stretch'):
+            try:
+                _auth.set_active(_who, not _active)
+                audit_log.record('account', action='disable' if _active else 'enable', target=_who)
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+
 with st.sidebar:
     st.markdown("### 🌿 CareFlow")
     st.caption("智慧居服排班工作台")
@@ -420,6 +578,26 @@ with st.sidebar:
     _sidebar_wake = st.container()
     _sidebar_status = st.container()
     _sidebar_privacy = st.container()
+    _errs = _session_errors()
+    if _errs:
+        with st.expander(f'⚠️ 本次作業有 {len(_errs)} 個錯誤（給資訊人員）'):
+            st.caption('畫面上已用白話說明，這裡是給資訊人員追查用的代碼。回報問題時請附上代碼或下載紀錄檔。')
+            for _e in reversed(_errs[-8:]):
+                st.markdown(f"`{_e['代碼']}` {_e['時間']}・{_e['位置']}  \n<span style='color:#8a5300;font-size:.85em'>{html.escape(_e['錯誤'][:160])}</span>",
+                            unsafe_allow_html=True)
+            try:
+                st.download_button('⬇️ 下載錯誤紀錄檔', _error_log_file().read_bytes(), 'careflow_errors.log', 'text/plain',
+                                   key='download_error_log')
+            except OSError:
+                pass
+
+    if _auth.enabled():
+        st.divider()
+        _account_panel()
+
+if _module == M_ANALYTICS and not _is_manager:
+    st.warning('「05 人力與效益分析」只有主管帳號可以查看（含營收、薪資等管理資料）。請改用 01～04，或請主管協助。')
+    st.stop()
 
 render_brand(CAREFLOW_BUILD, compact=_module != M_IMPORT)
 
@@ -601,6 +779,7 @@ def _restore_snapshot(file_hash):
     try:
         loaded = session_store.load(institution_key, file_hash)
     except Exception as exc:
+        _log_error('還原自動存檔', exc)
         st.session_state['_restore_error'] = '還原失敗：' + str(exc)
         return
     if not loaded:
@@ -690,7 +869,8 @@ try:
         if agency_source is None:
             try:
                 _latest = None if st.session_state.get('_restore_offer_done') else session_store.info(institution_key)
-            except Exception:
+            except Exception as _exc:
+                _log_error('讀取自動存檔資訊', _exc)
                 _latest = None
             if _latest:
                 _restore_offer(_latest, 'nofile')
@@ -764,6 +944,7 @@ try:
                         f'👥 {len(sheets["Caregiver_Profiles"]):,} 位居服員 · {len(sheets["Client_Profiles"]):,} 位個案<br>'
                         f'🗓️ {len(sheets["Tasks"]):,} 筆服務</div>', unsafe_allow_html=True)
 except Exception as exc:
+    _log_error('資料匯入失敗', exc)
     st.error('資料匯入失敗：'+str(exc))
     st.stop()
 
@@ -774,6 +955,8 @@ try:
     _client_names = identity_maps["clients"]
     _caregiver_names = identity_maps["caregivers"]
 except Exception as exc:
+    if '找不到姓名對照工作表' not in str(exc):   # 沒附對照表是正常情況，不算錯誤
+        _log_error('姓名對照未載入，系統仍可只用代碼排班', exc)
     _client_names, _caregiver_names = {}, {}
     if _module == M_IMPORT:
         st.warning("姓名對照未載入，系統仍可只用代碼排班：" + str(exc))
@@ -855,7 +1038,8 @@ if st.session_state.get('last_result') is not None:
 elif not st.session_state.get('_restore_offer_done'):
     try:
         _found = session_store.info(institution_key, _file_hash)
-    except Exception:
+    except Exception as _exc:
+        _log_error('讀取自動存檔資訊', _exc)
         _found = None
     if _found:
         _restore_offer(_found, 'file')
@@ -927,6 +1111,7 @@ if _module == M_IMPORT:
                 st.success("目前未命中程式既有服務碼提示；不代表已完成申報合規審核。")
 
         except Exception as e:
+            _log_error('暫無法執行 BA 代碼健檢（請確認任務與案家資料', e)
 
             st.info(f"暫無法執行 BA 代碼健檢（請確認任務與案家資料的「案家ID」欄位可正常對應）：{e}")
 
@@ -1144,6 +1329,7 @@ if _module == M_SCHEDULE:
                 phase2 = run_phase2_optimization(df_matches, tasks, df_cg, config)
                 did = run_phase3_did(df_hist)
             except Exception as e:
+                _log_error('⚠️ 派單運算過程發生錯誤', e)
                 st.error(f"⚠️ 派單運算過程發生錯誤：{e}")
                 st.stop()
 
@@ -1209,6 +1395,7 @@ if _module == M_SCHEDULE:
                         df_tasks_all.loc[_hit,'時間窗_結束'] = df_tasks_all.loc[_hit,'任務ID'].map(_new_times['新結束'])
                     did = run_phase3_did(st.session_state['data_hist'].copy())
                 except Exception as exc:
+                    _log_error('開始排班（全期間）', exc)
                     _friendly = traffic_wake.friendly_error(exc)
                     if _friendly:
                         # 交通主機沒醒：改用白話說明，並自動開始在背景喚醒，醒了再按一次即可。
@@ -1436,6 +1623,80 @@ if "last_result" in st.session_state:
         return None
 
 
+    def _render_worker_panel(worker):
+        """以居服員為主軸排班：跟著「個人週班」選的居服員，左邊看他的所屬案家，右邊勾選未排時段直接排入。"""
+        import worker_panel as _wp
+        subhead(f'👤 以居服員排班：{caregiver_label(worker)}')
+        st.caption('跟著上方「個人週班」選的居服員切換。左邊是他固定服務的案家；右邊勾選還沒排的案家時段，'
+                   '按「排入」就整段排進他的班表（每一次都會檢查時間衝突、轉場、工時與資格，不行的那幾天會留在未排並說明原因）。')
+        notice = st.session_state.pop('wp_notice', None)
+        if notice:
+            (st.success if notice[0] == 'ok' else st.warning)(notice[1])
+        tasks_w, effective_w = _workflow_frames()
+        overview = _wp.slot_overview(tasks_w, effective_w, worker, config.client_primary_map, res.get('df_cg'))
+        mine = _wp.owned_slots(overview)
+        left, right = st.columns([1, 1.55], gap='medium')
+        with left:
+            st.markdown(f"**所屬案家**　{mine['案家ID'].nunique()} 案・{len(mine)} 個固定時段")
+            if mine.empty:
+                st.info('他目前沒有固定服務的案家。可從右邊勾選案家時段排給他。')
+            else:
+                show_table(pd.DataFrame({
+                    '案家': mine['案家ID'].map(client_label), '時段': mine['星期'].str[-1] + ' ' + mine['時段'],
+                    '狀態': mine.apply(_wp.status_text, axis=1)}),
+                    hide_index=True, width='stretch', height=min(420, 38 + 35 * len(mine)),
+                    column_config={'時段': st.column_config.TextColumn('時段', help='星期＋服務時間'),
+                                   '狀態': st.column_config.TextColumn('本期狀態', width='medium')})
+        with right:
+            only_mine = st.toggle('只看他的所屬案家', key='wp_only_mine')
+            todo = _wp.open_slots(overview, only_owned=only_mine)
+            st.markdown(f'**還沒排的案家時段**　{len(todo)} 個')
+            if todo.empty:
+                st.success('沒有需要排的時段。')
+                return
+            table = pd.DataFrame({
+                '排入': False,
+                '案家': todo['所屬'].map({True: '★ ', False: ''}) + todo['案家ID'].map(client_label),
+                '時段': todo['星期'].str[-1] + ' ' + todo['時段'],
+                '固定居服員': todo['固定居服員ID'].map(lambda v: '他本人' if v == worker else (caregiver_label(v) if v else '未指定')),
+                '未排／他有空': todo['未排'].astype(str) + ' 次／' + todo['他有空的天數'].astype(str) + ' 天',
+                '距離': todo['距離(公里)'].map(lambda v: '' if pd.isna(v) else f'{v:g} km')})
+            picked = st.data_editor(
+                table, key=f'wp_pick_{worker}_{len(todo)}', hide_index=True, width='stretch',
+                disabled=[c for c in table.columns if c != '排入'],
+                height=min(420, 38 + 35 * len(table)),
+                column_config={'排入': st.column_config.CheckboxColumn('排入', width='small'),
+                               '案家': st.column_config.TextColumn('案家', help='★＝他是這個案家的固定居服員，或本期已服務過'),
+                               '固定居服員': st.column_config.TextColumn('固定居服員', help='固定居服員不是他時，只有在固定人選與備援都排不進時才能由他支援'),
+                               '未排／他有空': st.column_config.TextColumn('未排／他有空', help='還沒排的次數／其中他在這個時段沒有其他班的天數（尚未計入交通與工時）'),
+                               '距離': st.column_config.TextColumn('距離', width='small', help='他家到案家的直線距離')})
+            chosen = todo[picked['排入'].to_numpy(dtype=bool)]
+            total = int(chosen['未排'].sum())
+            label = (f'📌 把勾選的 {len(chosen)} 個時段（{total} 次服務）排給 {caregiver_label(worker)}' if len(chosen)
+                     else '先在上表勾選要排給他的時段')
+            if st.button(label, type='primary',
+                         key='wp_assign', disabled=chosen.empty, width='stretch'):
+                done, failed = [], []
+                day_of = dict(zip(tasks_w['任務ID'].astype(str), pd.to_datetime(tasks_w['日期'], errors='coerce')))
+                with st.spinner('逐次檢查並排入…'):
+                    for _, slot in chosen.iterrows():
+                        for tid in slot['未排任務ID']:
+                            problem = _quick_reassign(tid, worker, '以居服員排班：勾選案家時段排入')
+                            day = day_of.get(str(tid))
+                            if problem:
+                                failed.append(f"{client_label(slot['案家ID'])} {day:%m/%d}：{_label_ids_plain(problem)}" if pd.notna(day)
+                                              else f"{client_label(slot['案家ID'])}：{_label_ids_plain(problem)}")
+                            elif pd.notna(day):
+                                done.append(day.strftime('%Y-%m-%d'))
+                if done:
+                    _workflow_store.record_workdays((worker, d) for d in done)
+                done = len(done)
+                message = f'已排入 {done} 次服務給 {caregiver_label(worker)}。'
+                if failed:
+                    message += f' 有 {len(failed)} 次排不進，保留在未排：' + '；'.join(failed[:6]) + ('…' if len(failed) > 6 else '')
+                st.session_state['wp_notice'] = ('ok' if not failed else 'warn', message)
+                st.rerun()
+
     def _clear_override(task_id):
 
         """清除單一任務的居督覆寫，還原為 AI 建議；與原④區塊「清除覆寫」行為
@@ -1529,6 +1790,7 @@ if "last_result" in st.session_state:
                 config, task_locations=task_locations, date_column="日期", df_cl=res.get("df_cl"),
             )
         except Exception as exc:
+            _log_error('無法完成衝突檢查', exc)
             return "無法完成衝突檢查：" + str(exc)
         if conflict:
             return conflict
@@ -1538,6 +1800,7 @@ if "last_result" in st.session_state:
             save_override_log(task_id, old.get("案家ID", ""), old_label, new_cg,
                               f"{reason}｜時段 {original_day.date()} {old['時間窗_開始']}-{old['時間窗_結束']} → {new_day} {draft['start']}-{draft['end']}")
         except Exception as exc:
+            _log_error('寫入改班紀錄失敗', exc)
             return "寫入改班紀錄失敗：" + str(exc)
         res["df_tasks"] = proposed
         if "df_tasks_all" in res:
@@ -1616,6 +1879,7 @@ if "last_result" in st.session_state:
                 res.pop('google_verified_signature',None)
             res['route_signature']=route_signature
     except Exception as exc:
+        _log_error('交通暫未計算，班表仍可檢視與下載；估計交通留空。', exc)
         st.error('交通暫未計算，班表仍可檢視與下載；估計交通留空。原因：'+str(exc))
         res['route_result'] = pd.DataFrame()
     df_route_result = res.get('route_result', pd.DataFrame()).copy()
@@ -1679,6 +1943,7 @@ if "last_result" in st.session_state:
         _issue_overlaps = assigned_overlaps(_operational_tasks, _operational_assignments)
         _issue_transitions = transition_issues(df_route_result)
     except Exception as exc:
+        _log_error('衝突與異常整理暫時無法完成，班表不受影響。原因', exc)
         _issue_unassigned, _issue_overlaps, _issue_transitions = pd.DataFrame(columns=['問題類型', '案家ID']), None, None
         _schedule_notes.append(('warning', '衝突與異常整理暫時無法完成，班表不受影響。原因：' + str(exc)))
     _issue_table = issue_summary(_issue_unassigned, _issue_overlaps, _issue_transitions)
@@ -1727,13 +1992,13 @@ if "last_result" in st.session_state:
         module_header(M_ISSUES)
         _i1, _i2, _i3, _i4, _i5 = st.columns(5)
         _i1.metric('未成功派班', f"{total_tasks - assigned_count:,} 筆", delta=f"{len(_pending_clients)} 個案家", delta_color='off',
-                   help='尚未排入班表的服務；下方「未派案家與替代方案」逐案處理。')
+                   help='尚未排入班表的服務；下方「未派與替代方案」逐案處理。')
         _i2.metric('班次重疊', f"{_issue_count('班次重疊'):,} 筆", help='已派服務中同一人時段重疊，加上因時段重疊而排不進的服務。')
         _i3.metric('轉場不足', f"{_issue_count('轉場不足'):,} 筆", help='已派服務轉場時間不足或交通無法計算，加上因轉場空檔不足而排不進的服務。')
         _i4.metric('條件不符', f"{_issue_count('條件不符'):,} 筆", help='證照／訓練、資格期限、可服務星期不符而排不進的服務。')
         _i5.metric('工時與休息', f"{_issue_count('工時與休息'):,} 筆", help='每日工時、休息或連續上班天數限制而排不進的服務。')
-        _issue_views = ['未派案家與替代方案', '衝突與條件明細', '臨時異動']
-        _issue_view = big_tabs(_issue_views, 'cf_issue_view', icons=['🧩', '🔍', '⚡'])
+        _issue_views = ['未派與替代方案', '衝突與條件明細', '臨時異動', '週計畫異動']
+        _issue_view = big_tabs(_issue_views, 'cf_issue_view', icons=['🧩', '🔍', '⚡', '📅'])
         if _issue_view == '衝突與條件明細':
             st.caption('依問題類型整理；「已派需覆核」是已在班表上但需要居督確認的服務，「未派服務」是尚未排入的服務。')
             show_table(_issue_table, hide_index=True, width='stretch',
@@ -1764,7 +2029,7 @@ if "last_result" in st.session_state:
                                           '建議處理': st.column_config.TextColumn(width='medium')})
                 download_button_quiet('下載衝突與異常清單 CSV', export_frame(_issue_unassigned).to_csv(index=False).encode('utf-8-sig'),
                                       '衝突與異常清單.csv', 'text/csv', key='download_issue_list')
-                st.caption('替代方案：切換到「未派案家與替代方案」，系統會逐案試算前後挪時間、換人、拆成兩段等方案。')
+                st.caption('替代方案：切換到「未派與替代方案」，系統會逐案試算前後挪時間、換人、拆成兩段等方案。')
             if diagnostics:
                 with st.expander('候選配對及未派單原因（排班引擎原始診斷）'):
                     show_table(pd.DataFrame(diagnostics),hide_index=True,width='stretch')
@@ -2087,6 +2352,7 @@ if "last_result" in st.session_state:
                         with st.spinner('正在核對整案並試算可行方案…'):
                             _state = _analysis(_case, _edits, _worker0)
                     except Exception as exc:
+                        _log_error('分析失敗', exc)
                         st.error('分析失敗：' + str(exc)[:160])
                     if _state is None:
                         st.info('⏳ 這個案家正在背景分析原因與解法，算好會自動顯示（通常幾秒到十幾秒）；期間可以先看上面的班表。')
@@ -2145,6 +2411,7 @@ if "last_result" in st.session_state:
                                 try:
                                     _commit_case(_case, _pv, _simple_reason, _edits)
                                 except Exception as exc:
+                                    _log_error('寫入失敗', exc)
                                     st.error('寫入失敗：' + str(exc))
                         st.caption('寫入後：這案服務變成「已派」，上方待處理清單與未派數字立刻更新。調整只存在這次操作中（重新按「開始排班」會從 Excel 重算），'
                                    '所以請同步下載最下方「整案調整紀錄」，照它修改 Excel。')
@@ -2234,6 +2501,7 @@ if "last_result" in st.session_state:
                                 _row = simulate_worker(_pv, dict(config.work_day_minutes), _worker, _months, config)
                                 _row['_accepted'] = frozenset(str(t) for t in _pv['accepted']['任務ID'])
                             except Exception as exc:
+                                _log_error('整案試算居服員', exc)
                                 _row = {'居服員ID': _worker, '試算結果': '無法試算', '可安排': 0, '仍未派': _need['visits'],
                                         '總次數': _need['visits'], '月加班(時)': '—', '主要原因': str(exc)[:80], '_accepted': frozenset()}
                             _rows.append(_row)
@@ -2345,6 +2613,7 @@ if "last_result" in st.session_state:
                                     splits=_edits.get('splits'), moves=_edits.get('moves'), unit_minutes=_unit_minutes)
                             st.session_state['pending_client_preview'] = {'signature': _case_signature, 'result': _preview, 'reason': _case_reason or ''}
                         except Exception as exc:
+                            _log_error('整案預覽失敗', exc)
                             st.session_state.pop('pending_client_preview', None)
                             st.error('整案預覽失敗：' + str(exc))
                     _stored = st.session_state.get('pending_client_preview')
@@ -2379,6 +2648,7 @@ if "last_result" in st.session_state:
                                 try:
                                     _commit_case(_case, _preview, _case_reason, _edits, main=_case_worker)
                                 except Exception as exc:
+                                    _log_error('整案套用失敗', exc)
                                     st.error('整案套用失敗：' + str(exc))
                 _log_rows = res.get('whole_client_log') or []
                 if _log_rows:
@@ -2390,7 +2660,7 @@ if "last_result" in st.session_state:
                                               '整案調整紀錄.csv', 'text/csv', key='download_whole_client_log')
                         st.caption('原始 Excel 不會被自動改寫；若這些調整要長期保留，請照這份紀錄修改 Excel 後重新匯入。')
 
-        if _module == M_ISSUES and _issue_view == '未派案家與替代方案':
+        if _module == M_ISSUES and _issue_view == '未派與替代方案':
             if st.session_state.get('whole_client_notice'):
                 st.success(st.session_state.pop('whole_client_notice'))
             st.fragment(run_every=3 if _bg_busy else None)(_pending_panel)()
@@ -2445,7 +2715,8 @@ if "last_result" in st.session_state:
             _done02 = set(_eff02.loc[~_eff02['派單居服員'].astype(str).isin(['', '未指派', 'None', 'nan']), '任務ID'].astype(str))
             _left02 = df_tasks.loc[~df_tasks['任務ID'].astype(str).isin(_done02)]
             _n_task02, _n_client02 = len(_left02), _left02['案家ID'].astype(str).nunique()
-        except Exception:
+        except Exception as _exc:
+            _log_error('計算 02 未派數量', _exc)
             _n_task02 = _n_client02 = 0
         if _n_task02:
             _g1, _g2 = st.columns([3, 1], vertical_alignment='center')
@@ -2468,6 +2739,8 @@ if "last_result" in st.session_state:
             client_names=_client_names if _show_names else {},
             caregiver_names=_caregiver_names if _show_names else {},
         )
+        if st.session_state.get('cf_calendar_mode') == '個人週班' and st.session_state.get('cf_person'):
+            _render_worker_panel(str(st.session_state['cf_person']))
 
         # 居督人工覆寫（Supervisor Override）：與月曆「一鍵調班」共用同一套覆寫介面與稽覈日誌。
         subhead('人工調整')
@@ -2554,12 +2827,14 @@ if "last_result" in st.session_state:
                                          monthly_payroll, df_route_result, config.client_primary_map, caregivers=res.get('df_cg'))
             render_dashboard(_dashboard, caregiver_label, client_label)
         except Exception as exc:
+            _log_error('儀錶板暫時無法產生，其他班表功能不受影響。原因', exc)
             st.warning('儀錶板暫時無法產生，其他班表功能不受影響。原因：' + str(exc))
         try:
             from dashboard_view import render_pilot_kpis
             render_pilot_kpis(df_tasks, _effective_for_kpi, df_route_result, monthly_payroll,
                               config.client_primary_map, load_override_log())
         except Exception as exc:
+            _log_error('試辦 KPI 暫時無法產生，其他班表功能不受影響', exc)
             st.warning('試辦 KPI 暫時無法產生，其他班表功能不受影響。原因：' + str(exc))
 
         subhead('居服員工時與薪資')
@@ -2813,7 +3088,7 @@ if "last_result" in st.session_state:
     # ==========================================
 
     @st.fragment
-    def _changes_section():
+    def _changes_section(only_plan=False):
         """只重跑這一區：臨時異動的每個操作不再牽動上方的月曆、儀表板與大型表格。"""
         st.session_state.setdefault("dynamic_insertions", [])
         st.session_state.setdefault("dynamic_candidate_result", None)
@@ -2884,6 +3159,7 @@ if "last_result" in st.session_state:
                     options = [{'cg': str(r['cg_id']), 'reason': r.get('rank_reason', '')} for r in ranked if r.get('available')][:top]
                     error = '' if options else '找不到可派人選，請到「02 智慧排班作業」的人工調整處理'
                 except Exception as exc:
+                    _log_error('月曆待安排候選計算', exc)
                     options, error = [], f'候選計算失敗：{exc}'
                 items.append({'entry': entry, 'options': options, 'error': error})
             return {'cg': cg_id, 'day': day or '', 'items': items, 'done': done}
@@ -2986,8 +3262,301 @@ if "last_result" in st.session_state:
                 labels[row['任務ID']] = text
             return right.selectbox('服務', list(labels), format_func=labels.get, key=f'{prefix}_pick_task_{client}_{day}')
 
-        _event_choices = ["➕ 臨時新增案件", "🚨 居服員臨時請假", "🕒 案家臨時改期", "⏱️ 前一服務延遲", "🩺 個案照顧需求變更"]
-        _dynamic_event_type = big_tabs(_event_choices, "dynamic_event_type_selector", size="medium")
+
+        # ---------- 週計畫異動（異動單）：從生效日起改變案家的固定週時段；生效日前與其他案家完全不動 ----------
+        def _plan_change_tasks(new_bytes, client, effective):
+            """用排班引擎重新展開異動後的週計畫，只取這個案家生效日（含）之後的差異。"""
+            import io as _io
+            loaded = load_agency_workbook(_io.BytesIO(new_bytes), res.get('range_start', range_start), res.get('range_end', range_end),
+                                          daily_start=available_start.strftime('%H:%M'), daily_end=available_end.strftime('%H:%M'),
+                                          daily_cap=cap, availability_confirmed=confirmed, biweekly_anchor_confirmed=anchor)
+            fresh = loaded['Tasks'].copy()
+            fresh['使用Service_code重算'] = False
+            current_tasks, _ = _insertion_frames()
+            removed, added = _pv.task_delta(current_tasks, fresh, client, effective)
+            if not added.empty:
+                added = apply_service_duration(added, st.session_state['edit_service_code'].copy())
+                added['日期'] = pd.to_datetime(added['日期'], errors='coerce').dt.strftime('%Y-%m-%d')
+            issues = loaded['Import_Issues']
+            rows = set(added['來源列'].dropna().astype(int)) if '來源列' in added else set()
+            issues = issues[issues['來源列'].isin(rows)] if '來源列' in issues else issues.iloc[0:0]
+            return removed, added, issues
+
+        def _plan_change_picks(added, removed, client):
+            """新版班次逐筆找人：優先原固定人選，其次依代班挑選順序；同一批前面已選的也算進去，避免同一人撞班。"""
+            if added.empty:
+                return []
+            tasks_now, effective_now = _insertion_frames()
+            gone = set(removed)
+            tasks_now = tasks_now[~tasks_now['任務ID'].astype(str).isin(gone)]
+            effective_now = effective_now[~effective_now['任務ID'].astype(str).isin(gone)]
+            merged = merge_task_client_tables(added, res.get('df_cl', pd.DataFrame()))
+            found = search_slots(merged, tasks_now, effective_now, res['df_cg'], config)
+            owner = str(config.client_primary_map.get(str(client), '') or '')
+            picks = []
+            for item in found:
+                task, frame = item['task'], item['frame']
+                if str(task.get('任務資料異常') or '').strip() not in ('', 'nan'):
+                    picks.append({'task': task, 'cg_id': '', 'note': '與同案其他時段重疊，需人工確認'})
+                    continue
+                ok = frame[frame['可直接插入'] == True] if not frame.empty else frame   # noqa: E712
+                order = ok['居服員ID'].astype(str).tolist()
+                if owner in order:
+                    order.remove(owner)
+                    order.insert(0, owner)
+                chosen, note = '', '沒有可直接排入的居服員，列為待安排'
+                for cg_id in order[:8]:
+                    chk_tasks = pd.concat([tasks_now, pd.DataFrame([task])], ignore_index=True)
+                    problem = check_reassignment_conflict(str(task['任務ID']), cg_id, chk_tasks, effective_now, res['df_cg'], config,
+                                                          date_column='日期', df_cl=res.get('df_cl'))
+                    if problem:
+                        note = problem
+                        continue
+                    chosen = cg_id
+                    if cg_id == owner:
+                        note = '原固定人選'
+                    else:
+                        reason = ok.set_index(ok['居服員ID'].astype(str)).get('代班排序理由', pd.Series(dtype=object)).get(cg_id, '')
+                        note = '原固定人選這時段不行，改由代班順序第一位' + (f'（{_label_ids_plain(reason)}）' if str(reason).strip() else '')
+                    break
+                if chosen:
+                    tasks_now = pd.concat([tasks_now, pd.DataFrame([task])], ignore_index=True)
+                    effective_now = pd.concat([effective_now, pd.DataFrame([{'任務ID': task['任務ID'], '派單居服員': chosen}])], ignore_index=True)
+                picks.append({'task': task, 'cg_id': chosen, 'note': note})
+            return picks
+
+        def _commit_plan_change(preview, reason):
+            """套用異動單：移除舊版在生效日後的班次，新版班次併入班表並以人工覆寫指定居服員。"""
+            change, gone = preview['change'], set(preview['removed'])
+
+            def _drop(frame):
+                if not isinstance(frame, pd.DataFrame) or '任務ID' not in frame:
+                    return frame
+                kept = frame[~frame['任務ID'].astype(str).isin(gone)].copy()
+                kept.attrs = dict(frame.attrs)
+                return kept
+
+            raw = preview['added']
+            for key in ('df_tasks', 'df_tasks_all'):
+                if isinstance(res.get(key), pd.DataFrame):
+                    res[key] = pd.concat([_drop(res[key]), raw], ignore_index=True, sort=False)
+            phase2_frames = res.get('phase2') or {}
+            for key in ('df_result', 'df_matches'):
+                if key in phase2_frames:
+                    phase2_frames[key] = _drop(phase2_frames[key])
+            if 'df_matches' in res:
+                res['df_matches'] = _drop(res['df_matches'])
+            for tid in gone:
+                overrides.pop(tid, None)
+                config.task_support_map.pop(tid, None)
+                _workflow_store.remove_pending(tid)
+            res['task_support_map'] = dict(config.task_support_map)
+            st.session_state['dynamic_insertions'] = [i for i in st.session_state.get('dynamic_insertions', [])
+                                                      if str(i['task'].get('任務ID')) not in gone]
+            label = f'週計畫異動（{change.effective:%Y-%m-%d} 起）' + (f'：{reason}' if reason else '')
+            now = pd.Timestamp.now()
+            log = st.session_state.setdefault('dynamic_adjustment_log', [])
+            for pick in preview['picks']:
+                task = pick['task']
+                if pick['cg_id']:
+                    overrides[str(task['任務ID'])] = {'cg_id': pick['cg_id'], 'reason': label}
+                log.append({'時間戳記': now, '事件類型': '週計畫異動（新增）', '任務ID': task['任務ID'], '案家ID': task['案家ID'],
+                            '日期': task['日期'], '服務時段': f"{task['時間窗_開始']}-{task['時間窗_結束']}",
+                            '最終選擇居服員': pick['cg_id'] or '待安排', '人工改選原因': reason, '既有班表是否移動': '否'})
+            for tid in sorted(gone):
+                log.append({'時間戳記': now, '事件類型': '週計畫異動（停用舊時段）', '任務ID': tid, '案家ID': change.client,
+                            '人工改選原因': reason, '既有班表是否移動': '否'})
+            _workflow_store.record_workdays((p['cg_id'], p['task']['日期']) for p in preview['picks'] if p['cg_id'])
+            res['plan_version_bytes'] = preview['bytes']
+            waiting = sum(1 for p in preview['picks'] if not p['cg_id'])
+            res.setdefault('plan_version_log', []).append({
+                '套用時間': now.strftime('%Y-%m-%d %H:%M'), '案家ID': change.client, '生效日': change.effective.isoformat(),
+                '異動內容': '；'.join(change.summary()[1:]), '移除舊班次': len(gone), '新增班次': len(preview['picks']),
+                '待安排': waiting, '原因': reason})
+            audit_log.record('plan_change', client=change.client, effective=change.effective.isoformat(), stopped_rows=len(change.stop),
+                             added_rows=len(change.add), removed_tasks=len(gone), new_tasks=len(preview['picks']), unassigned=waiting)
+            st.session_state['workflow_notice'] = (f'✅ 已套用 {client_label(change.client)} 的週計畫異動（{change.effective:%m/%d} 起）：'
+                f'移除 {len(gone)} 個舊班次、新增 {len(preview["picks"])} 個' + (f'，其中 {waiting} 個待安排' if waiting else '')
+                + '。生效日前與其他案家的班表沒有變動；記得到「04 › 更新機構 Excel」下載新版 Excel。')
+            st.session_state.pop('pv_preview', None)
+
+        def _pv_set_form(fk, current, actions, new_slots, note=''):
+            """把範例或清除的結果寫進各選單（按鈕回呼，選單畫出來之前執行）。"""
+            for i, act in enumerate(actions):
+                st.session_state[f'pv_act_{fk}_{i}'] = act['動作']
+                st.session_state[f'pv_s_{fk}_{i}'] = act['開始']
+                st.session_state[f'pv_e_{fk}_{i}'] = act['結束']
+            st.session_state[f'pv_new_{fk}'] = list(range(len(new_slots)))
+            for j, slot in enumerate(new_slots):
+                for col in _pv.EDIT_COLUMNS:
+                    st.session_state[f'pv_n_{fk}_{j}_{col}'] = slot[col]
+            st.session_state[f'pv_note_{fk}'] = note
+            st.session_state.pop('pv_preview', None)
+
+        def _pv_example(fk, current, kind):
+            actions, new_slots, note = _pv.example_actions(current, kind)
+            _pv_set_form(fk, current, actions, new_slots, '🧪 已帶入' + note + '按「預覽異動與人選」看看結果，或再自行調整。')
+
+        def _pv_reset(fk, current):
+            _pv_set_form(fk, current, [{'動作': '不變', '開始': r['開始'], '結束': r['結束']} for _, r in current.iterrows()], [])
+
+        def _pv_add_slot(fk, current):
+            rows = st.session_state.get(f'pv_new_{fk}', [])
+            j = (max(rows) + 1) if rows else 0
+            base = current.iloc[0] if not current.empty else {'開始': '09:00', '結束': '10:00', '服務項目': ''}
+            used = set(current['星期']) if not current.empty else set()
+            st.session_state[f'pv_n_{fk}_{j}_星期'] = next((d for d in _pv.WEEKDAYS if d not in used), _pv.WEEKDAYS[0])
+            st.session_state[f'pv_n_{fk}_{j}_開始'] = base['開始']
+            st.session_state[f'pv_n_{fk}_{j}_結束'] = base['結束']
+            st.session_state[f'pv_n_{fk}_{j}_頻率'] = '每週'
+            st.session_state[f'pv_n_{fk}_{j}_服務項目'] = base['服務項目']
+            st.session_state[f'pv_new_{fk}'] = rows + [j]
+
+        def _pv_drop_slot(fk, j):
+            st.session_state[f'pv_new_{fk}'] = [k for k in st.session_state.get(f'pv_new_{fk}', []) if k != j]
+
+        def _render_plan_change():
+            subhead('📅 週計畫異動：從某天起改變案家的固定時段')
+            st.caption('照專複評、案家要求改時間、增減服務天數時使用。只會改這個案家「生效日起」的班次，'
+                       '生效日以前的班表和其他案家都不動。')
+            base = res.get('plan_version_bytes') or _agency_bytes
+            try:
+                weekly = _pv.read_weekly(base)
+            except Exception as exc:
+                _log_error('讀不到週服務計畫', exc)
+                st.error('讀不到週服務計畫：' + str(exc))
+                return
+            clients = sorted({str(v).strip() for v in weekly.get('案號', pd.Series(dtype=object)).dropna()} - {''})
+            if not clients:
+                st.info('週服務計畫沒有案家資料。')
+                return
+            period_start = pd.Timestamp(res.get('range_start', range_start)).date()
+            period_end = pd.Timestamp(res.get('range_end', range_end)).date()
+
+            st.markdown('**① 選案家與生效日**')
+            c1, c2 = st.columns([2, 1])
+            client = c1.selectbox('案家', clients, format_func=client_label, key='pv_client')
+            default_day = min(max(pd.Timestamp.today().date(), period_start), period_end)
+            effective = c2.date_input('從哪一天開始改', value=default_day, key='pv_effective')
+            if not (period_start <= effective <= period_end):
+                st.warning(f'這天不在目前班表期間（{period_start:%Y/%m/%d}～{period_end:%Y/%m/%d}）內：仍可寫回 Excel，但目前班表不會變。')
+            current, future = _pv.plan_as_of(weekly, client, effective)
+            fk = f'{client}_{effective.isoformat()}'
+            if f'pv_new_{fk}' not in st.session_state:
+                _pv_reset(fk, current)
+
+            st.markdown('**② 要怎麼改？**　沒填過的話，可以先按下面的範例看看效果')
+            e1, e2, e3, e4 = st.columns(4)
+            e1.button('🧪 範例：改時間', key=f'pv_ex_move_{fk}', on_click=_pv_example, args=(fk, current, 'move'),
+                      disabled=current.empty, width='stretch', help='把第一個時段往後 1 小時')
+            e2.button('🧪 範例：停掉一天', key=f'pv_ex_stop_{fk}', on_click=_pv_example, args=(fk, current, 'stop'),
+                      disabled=current.empty, width='stretch', help='最後一個時段從生效日起不再服務')
+            e3.button('🧪 範例：新增一天', key=f'pv_ex_add_{fk}', on_click=_pv_example, args=(fk, current, 'add'),
+                      width='stretch', help='在還沒服務的星期新增一個時段')
+            e4.button('↺ 清除重填', key=f'pv_ex_reset_{fk}', on_click=_pv_reset, args=(fk, current), width='stretch')
+            note = st.session_state.get(f'pv_note_{fk}')
+            if note:
+                st.info(note)
+
+            actions = []
+            with st.container(border=True):
+                st.markdown(f'**目前的固定時段**（{effective:%Y/%m/%d} 當天有效）')
+                if current.empty:
+                    st.caption('這天沒有有效時段（可能尚未生效或已到期），請用下方「新增時段」。')
+                for i, row in current.iterrows():
+                    a1, a2, a3, a4 = st.columns([3.2, 1.3, 1.1, 1.1], vertical_alignment='center')
+                    a1.markdown(f"**{row['星期']}　{row['開始']}–{row['結束']}**　"
+                                f"<span style='color:#667e76'>{row['頻率']}・{row['服務項目']}</span>", unsafe_allow_html=True)
+                    kind = a2.selectbox('怎麼處理', _pv.ACTIONS, key=f'pv_act_{fk}_{i}', label_visibility='collapsed')
+                    options = _pv.time_options([row['開始'], row['結束'], st.session_state.get(f'pv_s_{fk}_{i}'),
+                                                st.session_state.get(f'pv_e_{fk}_{i}')])
+                    if kind == '改時間':
+                        start = a3.selectbox('新開始', options, key=f'pv_s_{fk}_{i}', label_visibility='collapsed')
+                        end = a4.selectbox('新結束', options, key=f'pv_e_{fk}_{i}', label_visibility='collapsed')
+                    else:
+                        start, end = row['開始'], row['結束']
+                        a3.caption('停用' if kind == '停用' else '')
+                    actions.append({'動作': kind, '開始': start, '結束': end})
+                if not future.empty:
+                    st.caption('另有 ' + '、'.join(f"{r['星期']} {r['開始']}–{r['結束']}（{r['生效日']:%m/%d} 起）" for _, r in future.iterrows())
+                               + ' 之後才開始，這次不會改到。')
+
+            new_slots = []
+            item_choices = list(dict.fromkeys(current['服務項目'].tolist())) if not current.empty else []
+            with st.container(border=True):
+                st.markdown('**新增時段**（例如照專多核定一天）')
+                for j in st.session_state.get(f'pv_new_{fk}', []):
+                    n1, n2, n3, n4, n5, n6 = st.columns([1.2, 1.1, 1.1, 1, 2.6, .6], vertical_alignment='bottom')
+                    weekday = n1.selectbox('星期', _pv.WEEKDAYS, key=f'pv_n_{fk}_{j}_星期')
+                    current_items = st.session_state.get(f'pv_n_{fk}_{j}_服務項目', '')
+                    options = _pv.time_options([st.session_state.get(f'pv_n_{fk}_{j}_開始'), st.session_state.get(f'pv_n_{fk}_{j}_結束')])
+                    start = n2.selectbox('開始', options, key=f'pv_n_{fk}_{j}_開始')
+                    end = n3.selectbox('結束', options, key=f'pv_n_{fk}_{j}_結束')
+                    frequency = n4.selectbox('頻率', list(_pv.FREQUENCIES), key=f'pv_n_{fk}_{j}_頻率')
+                    choices = list(dict.fromkeys(item_choices + ([current_items] if current_items else []))) + ['自訂…']
+                    picked = n5.selectbox('服務項目', choices, key=f'pv_n_{fk}_{j}_服務項目')
+                    if picked == '自訂…':
+                        picked = st.text_input('自訂服務項目', key=f'pv_n_{fk}_{j}_自訂', placeholder='例如 BA02(1) BA20(2)')
+                    n6.button('✕', key=f'pv_n_{fk}_{j}_drop', on_click=_pv_drop_slot, args=(fk, j), help='刪除這個新增時段')
+                    new_slots.append({'星期': weekday, '開始': start, '結束': end, '頻率': frequency, '服務項目': picked})
+                st.button('＋ 新增一個時段', key=f'pv_add_{fk}', on_click=_pv_add_slot, args=(fk, current))
+                if any(s['頻率'] == '隔週' for s in new_slots):
+                    st.caption('隔週時段從生效日那一週開始算「有服務的那一週」。')
+
+            edited = _pv.compose_edit(current, actions, new_slots)
+            known = st.session_state['edit_service_code'].get('系統代碼', pd.Series(dtype=object)).dropna().astype(str).tolist()
+            draft, draft_errors = _pv.build_change(weekly, client, effective, edited, known or None)
+            st.markdown('**③ 確認修改內容**')
+            if draft is not None:
+                st.markdown('\n'.join('- ' + line for line in draft.summary()[1:]))
+            elif draft_errors and '完全一樣' in draft_errors[0]:
+                st.caption('還沒有任何修改。')
+            else:
+                for message in draft_errors:
+                    st.warning(message)
+            signature = (client, effective.isoformat(), session_store.file_key(base), repr(edited.to_dict('records')))
+            if st.button('🔍 預覽異動與人選', key='pv_preview_btn', type='primary', disabled=draft is None):
+                try:
+                    with st.spinner('重新展開週計畫並尋找人選…'):
+                        new_bytes, _ = _pv.write_change(base, draft)
+                        removed, added, issues = _plan_change_tasks(new_bytes, client, effective)
+                        picks = _plan_change_picks(added, removed, client)
+                    st.session_state['pv_preview'] = {'sig': signature, 'change': draft, 'bytes': new_bytes, 'removed': removed,
+                                                      'added': added, 'picks': picks, 'issues': issues}
+                except Exception as exc:
+                    _log_error('無法建立異動', exc)
+                    st.session_state.pop('pv_preview', None)
+                    st.error('無法建立異動：' + str(exc))
+            preview = st.session_state.get('pv_preview')
+            if not preview or preview['sig'] != signature:
+                return
+            st.markdown('**④ 排班結果預覽**')
+            if not preview['issues'].empty:
+                for message in preview['issues']['問題'].astype(str).unique():
+                    st.warning('新時段資料提醒：' + message)
+            waiting = sum(1 for p in preview['picks'] if not p['cg_id'])
+            m1, m2, m3 = st.columns(3)
+            m1.metric('拿掉的舊班次', f"{len(preview['removed'])} 個", help='生效日起，被停用或改時間的舊班次')
+            m2.metric('新排的班次', f"{len(preview['picks'])} 個")
+            m3.metric('找不到人', f'{waiting} 個', help='套用後會出現在未派清單，可用人工改派處理')
+            if preview['picks']:
+                show_table(pd.DataFrame([{
+                    '日期': f"{pd.Timestamp(p['task']['日期']):%m/%d}（{get_weekday_name(p['task']['日期'])[-1]}）",
+                    '時段': f"{p['task']['時間窗_開始']}-{p['task']['時間窗_結束']}",
+                    '建議居服員': caregiver_label(p['cg_id']) if p['cg_id'] else '待安排', '說明': p['note']}
+                    for p in preview['picks']]), hide_index=True, width='stretch')
+            elif not preview['removed']:
+                st.info('這次修改在目前班表期間內沒有影響任何班次（例如生效日在期間之後），套用後只會寫回 Excel。')
+            reason = st.selectbox('異動原因', ['照專複評', '案家要求改時間', '案家要求增減服務', '其他'], key='pv_reason')
+            if st.button('✅ 確認套用', type='primary', key='pv_commit'):
+                _commit_plan_change(preview, reason)
+                st.rerun()
+
+        def _render_plan_change_log():
+            if res.get('plan_version_log'):
+                st.markdown('##### 本次已套用的週計畫異動')
+                show_table(pd.DataFrame(res['plan_version_log']), hide_index=True, width='stretch')
+
 
         def _infer_dispatch_year(tasks_df):
             """LINE 訊息只有月／日：以目前班表期間的年份為準。"""
@@ -3009,6 +3578,13 @@ if "last_result" in st.session_state:
                 tasks = pd.concat([tasks, pd.DataFrame(extra_tasks)], ignore_index=True, sort=False)
                 effective = pd.concat([effective, pd.DataFrame(extra_rows)], ignore_index=True, sort=False)
             return tasks, effective
+
+        if only_plan:
+            _render_plan_change()
+            _render_plan_change_log()
+            return
+        _event_choices = ["➕ 臨時新增案件", "🚨 居服員臨時請假", "🕒 案家臨時改期", "⏱️ 前一服務延遲", "🩺 個案照顧需求變更"]
+        _dynamic_event_type = big_tabs(_event_choices, "dynamic_event_type_selector", size="medium")
 
         def _tc_service_codes():
             master = st.session_state["edit_service_code"]
@@ -3195,6 +3771,7 @@ if "last_result" in st.session_state:
                             found = search_slots(temp_tasks, tasks_now, effective_now, res["df_cg"], config)
                             tc["results"] = {"slots": found, "case": case}
                         except Exception as exc:
+                            _log_error('無法計算候選人', exc)
                             tc["results"] = None
                             st.error(f"無法計算候選人：{exc}")
 
@@ -3457,6 +4034,7 @@ if "last_result" in st.session_state:
                                                                or _dc.find_need_change(c, 'foot', want_split=True, budget=20.0)), 'new1': lambda c: _dc.find_line_example(c, 1), 'new2': lambda c: _dc.find_line_example(c, 2)}[_kind]
                             _found = _finder(_ctx)
                     except Exception as exc:
+                        _log_error('示範案例搜尋失敗', exc)
                         _found = None
                         st.error('示範案例搜尋失敗：' + str(exc))
                     if _kind in ('dementia', 'foot'):
@@ -3569,7 +4147,7 @@ if "last_result" in st.session_state:
                             return value
                         try:
                             return pd.to_datetime(str(value)).time()
-                        except Exception:
+                        except (ValueError, TypeError, OverflowError):   # 只接日期格式錯誤
                             return fallback
 
                     _orig_start = _reschedule_to_time(
@@ -3670,6 +4248,7 @@ if "last_result" in st.session_state:
                                 }
 
                             except Exception as e:
+                                _log_error('改期候選人計算失敗', e)
                                 st.session_state["reschedule_event_analysis"] = None
                                 st.error(f"改期候選人計算失敗：{e}")
 
@@ -3832,13 +4411,13 @@ if "last_result" in st.session_state:
                     return value
                 try:
                     return pd.to_datetime(str(value)).time()
-                except Exception:
+                except (ValueError, TypeError, OverflowError):   # 只接日期格式錯誤
                     return None
 
             def _delay_same_date(v1, v2):
                 try:
                     return pd.to_datetime(v1).date() == pd.to_datetime(v2).date()
-                except Exception:
+                except (ValueError, TypeError, OverflowError):   # 只接日期格式錯誤
                     return str(v1).split(" ")[0] == str(v2).split(" ")[0]
 
             def _build_delay_analysis(_ctx):
@@ -4022,6 +4601,7 @@ if "last_result" in st.session_state:
                             date_column="日期",
                         )
                     except Exception as _err:
+                        _log_error('前一服務延遲候選計算', _err)
                         _cand = pd.DataFrame()
                         _a["candidate_error"] = str(_err)
                     _a["candidates"] = _cand
@@ -4533,6 +5113,8 @@ if "last_result" in st.session_state:
         )
         st.info('🧭 ' + SUBSTITUTE_RULE_TEXT)
         _changes_section()
+    if _module == M_ISSUES and _issue_view == '週計畫異動':
+        _changes_section(only_plan=True)
     if _module == M_ISSUES:
         module_nav_buttons(M_ISSUES)
 
@@ -4541,7 +5123,8 @@ if "last_result" in st.session_state:
     # 單純開關視窗、切換日期或拖曳取消時直接沿用上次結果。
     try:
         _workflow_digest = hashlib.sha256(repr(sorted(_workflow_store.all_records().items())).encode()).hexdigest()
-    except Exception:
+    except Exception as _exc:
+        _log_error('讀取工作流程狀態（班表快取）', _exc)
         _workflow_digest = str(__import__('time').time_ns())  # 讀不到工作流程狀態時不使用快取
     _final_key = hashlib.sha256(repr((
         route_signature, _route_digest, _frame_digest(df_tasks), _frame_digest(df_result),
@@ -4759,6 +5342,60 @@ if "last_result" in st.session_state:
         )
 
         # ---- 更新後的機構 Excel：把固定人選、備援與整列時段調整直接寫回原檔，不必照紀錄手動回填 ----
+        subhead('📑 CSMS 申報與自付額試算')
+
+        @st.fragment
+        def _billing_view():
+            """每月申報明細（匯入 CSMS 用）＋每個案家的部分負擔、超額自費試算。"""
+            import billing as _bill
+            st.caption('依目前有效班表試算當月申報明細與案家自付額：照顧及專業服務先用每月額度，部分負擔依收入別（低收 0%、中低收 5%、一般戶 16%，'
+                       '小數無條件捨去），超過額度的部分案家全額自費。打卡網頁登錄「未遇」的服務不計費。這是試算，請核對後再匯入 CSMS。')
+            _months = sorted(pd.to_datetime(df_final['日期'], errors='coerce').dropna().dt.strftime('%Y-%m').unique().tolist())
+            if not _months:
+                st.info('班表沒有日期，無法試算。')
+                return
+            _b1, _b2 = st.columns([1, 2])
+            _month = _b1.selectbox('月份', _months, index=len(_months) - 1, key='billing_month')
+            _unit = _b2.text_input('服務單位代碼（CSMS 申報用，可先空白）', key='billing_unit_code', placeholder='例如 1234567890')
+            try:
+                _missed = set()
+                try:
+                    _punch = _checkin_store.punch_frame()
+                    _missed = set(_punch.loc[_punch['服務結果'].eq('未遇'), '任務ID'].astype(str))
+                except Exception as exc:
+                    _log_error('讀取打卡未遇紀錄（自付額試算）', exc)
+                _claims, _summary, _notes = _bill.build_month(
+                    df_final, res.get('df_cl'), service_price_map(st.session_state['edit_service_code']), _month,
+                    missed=_missed, sa10_price=config.sa10_hourly_price, unit_code=_unit.strip())
+            except ValueError as exc:
+                st.error('無法試算：' + str(exc))
+                return
+            if _summary.empty:
+                st.info('這個月沒有已派班的服務。')
+                return
+            _k = st.columns(4)
+            _k[0].metric('服務案家', f'{len(_summary)} 案')
+            _k[1].metric('政府補助（申報）', f"{int(_summary['政府補助（申報）'].sum()):,} 元")
+            _k[2].metric('案家自付合計', f"{int(_summary['案家應付合計'].sum()):,} 元")
+            _k[3].metric('超過額度的案家', f"{int((_summary['超額自費'] > 0).sum())} 案",
+                         help='這些案家當月服務超過照顧及專業服務額度，超過的部分要全額自費，建議先跟家屬說明')
+            for _n in _notes:
+                st.warning(_n)
+            _need = int(_summary['提醒'].astype(bool).sum())
+            if _need:
+                st.caption(f'⚠️ {_need} 個案家有提醒（缺核定等級、收入別不明、身障補助等），請看表格最右欄。')
+            _view = _summary.copy()
+            _view.insert(1, '案家', _view['案家ID'].map(client_label))
+            show_table(_view.drop(columns=['案家ID']), hide_index=True, width='stretch', height=min(460, 38 + 35 * len(_view)),
+                       column_config={'提醒': st.column_config.TextColumn('提醒', width='large')})
+            download_button_quiet(f'⬇️ 下載 {_month} 申報明細＋自付額試算（Excel）', _bill.to_excel(_claims, _summary, _notes, _month),
+                                  f'CSMS申報與自付額_{_month}.xlsx',
+                                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='billing_download')
+            st.caption(f'Excel 有三張表：「服務紀錄申報」{len(_claims)} 筆（一次服務一個服務碼一列）、「自付額試算」、「說明」。'
+                       '身分證號欄位留空（本系統不存身分證），匯入前請在機構系統對照補上；欄位若與 CSMS 範本不同，以範本為準。')
+
+        _billing_view()
+
         subhead('更新機構 Excel')
         st.caption('把本次確定的「歷史首選（固定人選）」「歷史備援」與「週服務計畫的時段調整」寫回你上傳的 Excel，其他工作表、公式與格式保持不變。'
                    '只影響某一天的改派、請假代班與臨時插單不會改動週計畫，它們已自動存檔，並列在上方服務班表 Excel 裡。')
@@ -4779,11 +5416,14 @@ if "last_result" in st.session_state:
             _shift_changes, _shift_skipped = weekly_changes_from_shifts((res.get('phase2') or {}).get('time_shifts'),
                                                                         res.get('df_tasks_all', df_tasks))
             _weekly.update(_shift_changes)
-            _u1, _u2, _u3 = st.columns(3)
+            _plan_bytes = res.get('plan_version_bytes')
+            _plan_log = res.get('plan_version_log') or []
+            _u1, _u2, _u3, _u4 = st.columns(4)
+            _u4.metric('週計畫異動', f'{len(_plan_log)} 張', help='03 › 臨時異動 › 週計畫異動：舊時段設到期日、新時段新增一列')
             _u1.metric('固定人選變更', f'{len(_owners)} 案')
             _u2.metric('寫入歷史備援', f'{len(_backups)} 案')
             _u3.metric('週計畫時段調整', f'{len(_weekly)} 列')
-            if not (_owners or _backups or _weekly):
+            if not (_owners or _backups or _weekly or _plan_bytes):
                 st.info('目前沒有需要寫回 Excel 的固定人選、備援或週計畫時段變更。')
                 return
             if _owners:
@@ -4792,7 +5432,8 @@ if "last_result" in st.session_state:
                                              for c, w in sorted(_owners.items())]), hide_index=True, width='stretch')
             if _shift_skipped is not None and not _shift_skipped.empty:
                 st.caption(f'另有 {len(_shift_skipped)} 列時段調整只影響部分日期，不寫回週計畫（需居督決定）。')
-            _key = session_store.change_token((sorted(_owners.items()), sorted(_backups.items()), sorted(_weekly.items()), _file_hash))
+            _key = session_store.change_token((sorted(_owners.items()), sorted(_backups.items()), sorted(_weekly.items()), _file_hash,
+                                               session_store.file_key(_plan_bytes) if _plan_bytes else ''))
             _cached = st.session_state.get('_source_update_cache')
             if _cached and _cached[0] == _key:
                 download_button_quiet('⬇️ 下載更新後的機構 Excel', _cached[1],
@@ -4805,8 +5446,9 @@ if "last_result" in st.session_state:
                     with st.spinner('寫回固定人選、備援與時段調整…'):
                         audit_log.record('export', kind='更新機構 Excel')
                         st.session_state['_source_update_cache'] = (_key, update_source_workbook(
-                            _agency_bytes, _owners, _weekly or None, _backups or None))
+                            _plan_bytes or _agency_bytes, _owners, _weekly or None, _backups or None))
                 except Exception as exc:
+                    _log_error('產生失敗（請確認 Excel 含「個案資料」與「', exc)
                     st.error('產生失敗（請確認 Excel 含「個案資料」與「週服務計畫」工作表）：' + str(exc))
                     return
                 try:
@@ -4815,6 +5457,331 @@ if "last_result" in st.session_state:
                     st.rerun()
 
         _source_update_download()
+
+        subhead('📱 居服員打卡')
+
+        def _checkin_publish():
+            _n, _removed, _rng = _checkin_store.publish_shifts(df_final, _client_names)
+            audit_log.record('checkin_publish', rows=int(_n), removed=int(_removed))
+            st.session_state['checkin_publish_note'] = (
+                (True, f'已發布 {_n} 筆班（{_rng[0]}～{_rng[1]}）' + (f'，移除 {_removed} 筆已不在班表的班。' if _removed else '。'))
+                if _n else (False, '目前班表沒有已派班的服務可以發布。'))
+
+        def _checkin_decide(device_id, approve):
+            cg = _checkin_store.decide_device(device_id, approve)
+            if cg:
+                audit_log.record('checkin_device', caregiver=cg, action='approve' if approve else 'reject')
+
+        def _checkin_revoke(device_id):
+            if _checkin_store.revoke_device(device_id):
+                audit_log.record('checkin_device', action='revoke')
+
+        def _checkin_demo(add):
+            if add:
+                _cg = st.session_state.get('checkin_demo_cg')
+                if _cg:
+                    _checkin_store.add_demo_shift(_cg)
+                    st.session_state['checkin_board_day'] = pd.Timestamp.today().date()
+            else:
+                _checkin_store.clear_demo()
+
+        @st.fragment
+        def _checkin_panel():
+            """居服員用手機打卡：網址＋QR Code、發布班表、一鍵產生 PIN、今日打卡看板。居督不用碰指令視窗。"""
+            st.caption('居服員不用裝 App：手機掃 QR Code 打開打卡網頁，輸入員工編號，看到今天的案家，到了按「到勤打卡」、離開按「離開打卡」，'
+                       '系統記下時間和位置。下面照 ①～④ 做就好。')
+            try:
+                _n_pend = len(_checkin_store.devices(_checkin_store.DEVICE_PENDING))
+            except Exception as _exc:
+                _log_error('讀取待核准手機', _exc)
+                _n_pend = 0
+            if _n_pend:
+                st.warning(f'🔔 有 {_n_pend} 支新手機等你核准，請看下方 ③。')
+            _missing_pkgs = _checkin_runner.missing_packages()
+            if _missing_pkgs:
+                _names = '、'.join(p.split('>')[0] for p in _missing_pkgs)
+                _m1, _m2 = st.columns([3, 1], vertical_alignment='center')
+                _m1.warning(f'這台電腦還缺打卡用的元件（{_names}）。按右邊按鈕自動安裝，約需 1 分鐘，需要網路。')
+                if _m2.button('🧩 一鍵安裝', key='checkin_install', type='primary', width='stretch'):
+                    with st.spinner('安裝中，請稍候…'):
+                        _ok, _msg = _checkin_runner.install_missing()
+                    (st.success if _ok else st.error)(_msg)
+                    if _ok:
+                        st.rerun()
+                if any(p.startswith(('flask', 'waitress')) for p in _missing_pkgs):
+                    return          # 沒有 flask／waitress 打卡網頁開不起來，先裝好
+            try:
+                _running, _run_msg = _checkin_runner.ensure_running()
+                _url, _kind = _checkin_runner.checkin_url()
+                _nics = _checkin_runner.lan_candidates() if _kind == '辦公室網路' else []
+            except Exception as exc:
+                _log_error('打卡網頁無法啟動', exc)
+                st.error('打卡網頁無法啟動：' + str(exc))
+                return
+            _q1, _q2 = st.columns([1, 2.4], gap='large')
+            with _q1:
+                if _checkin_runner.qr_available():
+                    st.image(_checkin_runner.qr_png(_url), width=190)
+                    download_button_quiet('⬇️ 下載 QR Code 圖片', _checkin_runner.qr_png(_url, scale=16), '居服員打卡QRCode.png',
+                                          'image/png', key='checkin_qr_download')
+                else:
+                    st.info('裝好上方元件後，這裡會顯示 QR Code。現在也可以先把右邊的網址直接傳給居服員。')
+            with _q2:
+                st.markdown('**① 把打卡網址給居服員**（傳到 LINE 群組，或印出左邊的 QR Code）')
+                st.code(_url, language=None)
+                if not _running:
+                    st.error('❌ ' + _run_msg)
+                if _kind == '固定網址':
+                    st.success('🔒 固定 https 網址：居服員在任何地方都能打卡，手機會記錄定位。')
+                elif _kind == '外部網址':
+                    st.success('🌐 外部網址已開啟：居服員用行動網路在任何地方都能打卡，手機會記錄定位。')
+                    st.caption('這台電腦要保持開機、連網、CareFlow 開著；重開 CareFlow 後網址會變，記得重新傳 QR Code 給居服員。'
+                               '正式上線建議請資訊人員設定固定網址（下方「進階」）。')
+                    if st.button('停止外部網址', key='checkin_tunnel_stop'):
+                        _checkin_runner.stop_tunnel()
+                        st.rerun()
+                else:
+                    st.warning('⚠️ 這個網址只有連同一個 Wi-Fi 的手機打得開。居服員在外面跑服務要打卡，請按下面按鈕產生外部網址。')
+                    if st.button('🌐 產生外部網址（居服員在外面也能打卡）', key='checkin_tunnel_start', type='primary', width='stretch'):
+                        with st.spinner('啟動中…第一次會先下載 Cloudflare 官方免費工具（約 50MB），請稍候 1～2 分鐘'):
+                            try:
+                                _t_ok, _t_msg = _checkin_runner.start_tunnel()
+                            except Exception as exc:
+                                _log_error('啟動打卡外部網址', exc)
+                                _t_ok, _t_msg = False, f'無法啟動外部網址：{exc}'
+                        if _t_ok:
+                            audit_log.record('checkin_url', tunnel=True)
+                            st.rerun()
+                        st.error(_t_msg)
+                    st.caption('會用 Cloudflare 的免費通道，產生一個 https 網址連到這台電腦；不用設防火牆，飯店、家裡的網路也能用。')
+                if _running:
+                    st.caption(f'想先自己試：在這台電腦打開 [http://localhost:{_checkin_runner.PORT}](http://localhost:{_checkin_runner.PORT})，'
+                               '按 F12 再按 Ctrl+Shift+M 切成手機畫面。')
+                if _kind == '辦公室網路':
+                    with st.expander('只在辦公室試用（手機和電腦連同一個 Wi-Fi）'):
+                        if len(_nics) > 1:
+                            _ips = [n['IP'] for n in _nics]
+                            _cur = _url.split('//')[1].split(':')[0]
+
+                            def _pick_nic():
+                                _checkin_store.set_setting(_checkin_runner.CHOSEN_IP_KEY, st.session_state['checkin_nic'])
+                            st.selectbox('手機要連的網路（這台電腦有好幾張網卡，請選 Wi-Fi 或乙太網路那張）', _ips,
+                                         index=_ips.index(_cur) if _cur in _ips else 0, key='checkin_nic', on_change=_pick_nic,
+                                         format_func=lambda ip: next(f"{n['名稱']}：{ip}" + ('（虛擬網卡，手機連不到）' if n['虛擬網卡'] else
+                                                                      '（建議）' if ip == _ips[0] else '') for n in _nics if n['IP'] == ip))
+                        st.markdown(
+                            '手機掃了打不開時：\n'
+                            '1. 手機要連**同一個 Wi-Fi**，不能用 4G／5G。\n'
+                            '2. 上面要選 Wi-Fi 或乙太網路那張網卡；「vEthernet」「WSL」「VPN」是虛擬網卡。\n'
+                            '3. Windows 設定 › 網路和網際網路 › 目前的 Wi-Fi › 網路設定檔類型選「**私人網路**」。\n'
+                            '4. 飯店、訪客 Wi-Fi、部分公司 Wi-Fi 會擋手機連電腦，這時請改用上面的外部網址。\n\n'
+                            '這種方式手機不會給定位（打卡會標「無定位」）。')
+                with st.expander('進階：設定固定打卡網址（資訊人員）'):
+                    st.caption('照 checkin/README.md「正式上線」架好後，把 https 網址貼在這裡，上面的 QR Code 會自動更新。清空再儲存＝不使用固定網址。')
+                    _new_url = st.text_input('固定網址', value=_url if _kind == '固定網址' else '', key='checkin_url_input',
+                                             placeholder='https://checkin.你的網域.tw')
+                    if st.button('儲存網址', key='checkin_url_save'):
+                        try:
+                            _checkin_runner.save_public_url(_new_url)
+                            audit_log.record('checkin_url', fixed=bool(_new_url.strip()))
+                            st.rerun(scope='fragment')
+                        except ValueError as exc:
+                            st.error(str(exc))
+
+            st.markdown('**② 發布班表到居服員手機**')
+            _first, _last, _count, _pub_at = _checkin_store.published_range()
+            _b1, _b2 = st.columns([3, 1], vertical_alignment='center')
+            _b1.caption(f'手機上目前有 {_count} 筆班（{_first}～{_last}，最後發布 {str(_pub_at)[:16]}）。排班有改（代班、改期、週計畫異動）後，再按一次就會更新；已打的卡不受影響。'
+                        if _count else '還沒發布。按右邊按鈕，居服員手機才看得到自己的班。')
+            _b2.button('📲 發布目前班表', key='checkin_publish', type='primary', width='stretch', on_click=_checkin_publish,
+                       help='只發布已派班的服務；案家名稱遮罩成「王○明」，不顯示地址電話。')
+            _pub_note = st.session_state.pop('checkin_publish_note', None)
+            if _pub_note:
+                (st.success if _pub_note[0] else st.warning)(_pub_note[1])
+
+            st.markdown('**③ 居服員的手機**')
+            _pend = _checkin_store.devices(_checkin_store.DEVICE_PENDING)
+            _act = _checkin_store.devices(_checkin_store.DEVICE_ACTIVE)
+            _people = _checkin_store.published_caregivers()
+            _bound = {d['caregiver_id'] for d in _act}
+            st.caption(f'居服員第一次打開打卡網頁，輸入員工編號就會綁定那支手機，不用密碼。換手機時才需要你在這裡核准。'
+                       f'目前 {len(_bound)}／{len(_people)} 位已綁定手機。')
+            st.toggle('第一支手機自動綁定（建議推行初期打開；關掉後每支手機都要你核准）', key='checkin_auto_bind',
+                      value=_checkin_store.auto_bind_enabled(),
+                      on_change=lambda: _checkin_store.set_setting(_checkin_store.AUTO_BIND_KEY,
+                                                                   '1' if st.session_state['checkin_auto_bind'] else '0'))
+            for _d in _pend:
+                _old = next((a for a in _act if a['caregiver_id'] == _d['caregiver_id']), None)
+                with st.container(border=True):
+                    _r1, _r2, _r3 = st.columns([4, 1, 1], vertical_alignment='center')
+                    _r1.markdown(f"🔔 **{caregiver_label(_d['caregiver_id'])}** 用新手機要求登入：{_d['label']}（{_d['created_at'][5:16]}）"
+                                 + (f"<br><span style='color:#667e76'>核准後舊手機（{_old['label']}）會自動解除。如果不是本人，請按拒絕並聯絡他。</span>"
+                                    if _old else ''), unsafe_allow_html=True)
+                    _r2.button('✅ 核准', key=f"checkin_ok_{_d['id']}", type='primary', width='stretch',
+                               on_click=_checkin_decide, args=(_d['id'], True))
+                    _r3.button('拒絕', key=f"checkin_no_{_d['id']}", width='stretch',
+                               on_click=_checkin_decide, args=(_d['id'], False))
+            with st.expander(f'已綁定的手機（{len(_act)} 支）・解除綁定'):
+                if not _act:
+                    st.caption('還沒有人綁定手機。')
+                else:
+                    show_table(pd.DataFrame([{'居服員': caregiver_label(d['caregiver_id']), '手機': d['label'],
+                                              '綁定時間': (d['decided_at'] or d['created_at'])[:16], '最後使用': (d['last_seen'] or '')[:16]}
+                                             for d in _act]), hide_index=True, width='stretch')
+                    _u1, _u2 = st.columns([3, 1], vertical_alignment='bottom')
+                    _rid = _u1.selectbox('要解除的手機', [d['id'] for d in _act], key='checkin_revoke_pick',
+                                         format_func=lambda i: next(f"{caregiver_label(d['caregiver_id'])}・{d['label']}" for d in _act if d['id'] == i))
+                    _u2.button('解除綁定', key='checkin_revoke', width='stretch', on_click=_checkin_revoke, args=(_rid,),
+                               help='手機遺失、離職或綁錯人時用。解除後那支手機立刻不能打卡；本人重新輸入員編會再綁一次。')
+
+            st.markdown('**④ 今日打卡看板**')
+            _t1, _t2 = st.columns([3, 1], vertical_alignment='bottom')
+            st.session_state.setdefault('checkin_board_day', pd.Timestamp.today().date())
+            _bday = _t1.date_input('日期', key='checkin_board_day')
+            if _t2.button('🔄 重新整理', key='checkin_board_refresh', width='stretch'):
+                st.rerun(scope='fragment')
+            with st.expander('🎬 示範工具（demo 用）'):
+                st.caption('替一位居服員建立「今天、現在開始 1 小時」的示範班，用手機實際打一次卡。示範班沒有案家位置，'
+                           '看板改顯示「打卡位置」地圖連結；不會算進執行對照，示範完按清除即可。')
+                _demo_people = sorted(set(_checkin_store.published_caregivers()) | {d['caregiver_id'] for d in _checkin_store.devices(_checkin_store.DEVICE_ACTIVE)})
+                _x1, _x2, _x3 = st.columns([2, 1, 1], vertical_alignment='bottom')
+                _x1.selectbox('示範的居服員', _demo_people, key='checkin_demo_cg', format_func=caregiver_label,
+                              disabled=not _demo_people, help='先完成 ② 發布班表，這裡才有居服員可選。')
+                _x2.button('➕ 建立示範班', key='checkin_demo_add', width='stretch', disabled=not _demo_people,
+                           on_click=_checkin_demo, args=(True,))
+                _x3.button('🧹 清除示範資料', key='checkin_demo_clear', width='stretch', on_click=_checkin_demo, args=(False,))
+            _board = _checkin_store.day_board(_bday)
+            if _board.empty:
+                st.info('這天沒有已發布的班。')
+                return
+            _cnt = _board['狀態'].value_counts()
+            _k = st.columns(5)
+            _k[0].metric('今天的班', len(_board))
+            _k[1].metric('已到勤', int(_cnt.get('服務中', 0) + _cnt.get('已完成', 0)))
+            _k[2].metric('已完成', int(_cnt.get('已完成', 0)))
+            _k[3].metric('未遇', int(_cnt.get('未遇', 0)))
+            _k[4].metric('逾時未到勤', int(_cnt.get('逾時未到勤', 0)), help='已過開始時間 15 分鐘還沒按到勤打卡；可打電話確認。')
+            _icon = {'未開始': '⚪ 還沒到', '服務中': '🟢 服務中', '已完成': '✅ 已完成', '未遇': '🟠 未遇', '逾時未到勤': '🔴 逾時未到勤'}
+            show_table(pd.DataFrame({
+                '時段': _board['時段'], '居服員': _board['居服員ID'].map(caregiver_label), '案家': _board['案家ID'].map(lambda c: '🎬 示範案家' if c == 'DEMO' else client_label(c)),
+                '狀態': _board['狀態'].map(lambda v: _icon.get(v, v)), '到勤': _board['到勤'], '離開': _board['離開'],
+                '距案家': _board['距案家(公尺)'].map(lambda v: '' if pd.isna(v) else f'{int(v)} 公尺'),
+                '打卡位置': _board['打卡位置'], '提醒': _board['提醒']}),
+                hide_index=True, width='stretch', height=min(560, 38 + 35 * len(_board)),
+                column_config={'打卡位置': st.column_config.LinkColumn('打卡位置', display_text='📍 地圖', width='small',
+                                                                   help='到勤打卡時手機的位置，點開用 Google 地圖看')})
+            st.caption('距案家：到勤打卡時手機位置和案家座標的距離，超過 300 公尺請留意。整段期間的遲到、早退、缺卡統計請看下方「執行對照」。')
+
+        _checkin_panel()
+
+        subhead('執行對照（排定 vs 實際）')
+
+        @st.fragment
+        def _attendance_view():
+            """匯入打卡／服務紀錄，逐筆對上目前有效班表，標出未遇、無紀錄、遲到、早退、缺卡、換人、地點異常、排外服務。"""
+            st.caption('讀取打卡網頁的紀錄，或上傳機構系統匯出的服務紀錄（Excel／CSV），系統依任務ID，或「日期＋案家＋時間最近」對上班表。'
+                       '紀錄不寫回機構 Excel；稽核紀錄只記筆數。')
+            _src = st.radio('紀錄來源', ['打卡網頁', '上傳檔案'], horizontal=True, key='attendance_source')
+            _file = None
+            if _src == '打卡網頁':
+                _first, _last, _count, _pub_at = _checkin_store.published_range()
+                st.caption(f'讀取上方「📱 居服員打卡」的紀錄（手機上目前有 {_count} 筆班，{_first}～{_last}）。'
+                           if _count else '還沒發布班表到打卡網頁，請先到上方「📱 居服員打卡」② 發布。')
+            else:
+                _up, _tpl = st.columns([3, 1])
+                _file = _up.file_uploader('打卡／服務紀錄', type=['xlsx', 'xls', 'csv'], key='attendance_upload', label_visibility='collapsed')
+                _tpl_buf = io.BytesIO()
+                _att.template_frame().to_excel(_tpl_buf, index=False)
+                with _tpl:
+                    download_button_quiet('⬇️ 下載匯入範本', _tpl_buf.getvalue(), '打卡紀錄匯入範本.xlsx',
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='attendance_template')
+            with st.expander('判定容許值與欄位說明', expanded=False):
+                _g1, _g2, _g3, _g4, _g5 = st.columns(5)
+                _late = _g1.number_input('遲到容許（分）', 0, 120, int(config.attendance_late_grace_mins), 5, key='att_late')
+                _early = _g2.number_input('早退容許（分）', 0, 120, int(config.attendance_early_leave_grace_mins), 5, key='att_early')
+                _ratio = _g3.number_input('時數不足門檻（%）', 50, 100, int(round(config.attendance_short_ratio * 100)), 5, key='att_ratio')
+                _radius = _g4.number_input('打卡距離上限（公尺）', 50, 5000, int(config.attendance_gps_radius_m), 50, key='att_radius')
+                _window = _g5.number_input('配對時間範圍（分）', 30, 720, int(config.attendance_match_window_mins), 30, key='att_window',
+                                           help='紀錄沒有任務ID時，打卡與排定開始時間相差多少分鐘內才視為同一筆服務。')
+                st.markdown('- 一列一次服務：`日期`、`居服員ID`、`案家ID`、`簽到時間`、`簽退時間`，選填 `任務ID`、`服務結果`（填「未遇」「案家不在」「取消」）、`補卡`、`緯度`、`經度`、`備註`。\n'
+                            '- 也接受一列一次打卡：`居服員ID`、`案家ID`、`打卡類型`（簽到／簽退）、`打卡時間`。\n'
+                            '- 常見別名可自動辨識（員工編號、案號、個案編號、實際開始、民國日期 115/11/02 等）。')
+            if _src == '上傳檔案' and _file is None:
+                st.info('尚未匯入紀錄。可先用機構系統或紙本簽到表整理後匯入。')
+                return
+            _cfg = replace(config, attendance_late_grace_mins=float(_late), attendance_early_leave_grace_mins=float(_early),
+                           attendance_short_ratio=float(_ratio) / 100, attendance_gps_radius_m=float(_radius),
+                           attendance_match_window_mins=float(_window))
+            try:
+                if _src == '打卡網頁':
+                    _sched_days = pd.to_datetime(df_final['日期'], errors='coerce').dropna()
+                    if _sched_days.empty:
+                        st.info('班表沒有日期，無法對照。')
+                        return
+                    _raw = _checkin_store.punch_frame(_sched_days.min().date(), _sched_days.max().date())
+                    if _raw.empty:
+                        st.info('班表期間內打卡網頁還沒有任何打卡紀錄。')
+                        return
+                    _bytes = _raw.to_csv(index=False).encode('utf-8')
+                else:
+                    _bytes = _file.getvalue()
+                    _raw = _att.read_records(_bytes, _file.name)
+                _sha = hashlib.sha256(_bytes).hexdigest()
+                _recs, _info = _att.normalize_records(_raw)
+            except Exception as exc:   # 檔案格式錯誤只影響這一區
+                _log_error('無法讀取紀錄', exc)
+                st.error(f'無法讀取紀錄：{exc}')
+                return
+            if st.session_state.get('_attendance_logged') != _sha:
+                audit_log.record('attendance_import', source=_src, file_sha256=_sha, rows=int(len(_recs)))
+                st.session_state['_attendance_logged'] = _sha
+            _days = [d for d in _recs['日期'] if d]
+            if not _days:
+                st.warning('紀錄中沒有可辨識的日期。')
+                return
+            _as_of = st.date_input('對照截止日（含）', value=max(_days), key=f'att_asof_{_sha[:8]}',
+                                   help='截止日之後的排定服務顯示「尚無紀錄」，不算未到。')
+            _result = _att.reconcile(df_final, _recs, _cfg, as_of=_as_of)
+            _sum = _att.summary(_result)
+            st.caption(f"辨識欄位：{'、'.join(_info['辨識欄位'])}；讀入 {len(_recs)} 筆紀錄"
+                       + (f"，略過 {_info['略過列數']} 列（缺日期或人員）" if _info['略過列數'] else '')
+                       + f"；截止日後尚無紀錄 {_sum['尚無紀錄']} 筆。")
+            _m = st.columns(7)
+            _m[0].metric('應對照服務', _sum['應對照'])
+            _m[1].metric('正常', _sum['正常'])
+            _m[2].metric('無紀錄', _sum['無紀錄'], help='排定有派班、截止日前，但找不到打卡或服務紀錄：可能未到或漏登。')
+            _m[3].metric('未遇', _sum['未遇'])
+            _m[4].metric('遲到／早退', f"{_sum['遲到']}／{_sum['早退']}")
+            _m[5].metric('排外服務', _sum['排外服務'], help='有紀錄但班表沒有這筆服務。')
+            _m[6].metric('準時率', '—' if _sum['準時率'] is None else f"{_sum['準時率']}%")
+            _extra = [f"{k} {_sum[k]}" for k in ['缺卡', '補卡待審', '時數不足', '換人服務', '地點異常'] if _sum[k]]
+            if _extra:
+                st.caption('其他：' + '、'.join(_extra))
+
+            _tab_issue, _tab_all, _tab_cg = st.tabs(['待處理異常', '全部對照', '居服員彙總'])
+            _hide = {_att.STATUS_OK, _att.STATUS_NOT_YET, _att.STATUS_UNASSIGNED}
+            _cols = {'案家ID': st.column_config.TextColumn('案家', width='medium'),
+                     '排定居服員': st.column_config.TextColumn('排定居服員', width='medium'),
+                     '實際居服員': st.column_config.TextColumn('實際居服員', width='medium'),
+                     '建議處理': st.column_config.TextColumn('建議處理', width='large')}
+            with _tab_issue:
+                _issues = _result[~_result['狀態'].isin(_hide)]
+                if _issues.empty:
+                    st.success('截止日前的服務都有正常紀錄。')
+                else:
+                    _sev = st.multiselect('嚴重度', ['高', '中', '低'], default=['高', '中', '低'], key='att_sev')
+                    _issues = _issues[_issues['嚴重度'].isin(_sev)]
+                    show_table(_issues, hide_index=True, width='stretch', column_config=_cols)
+                    st.caption(f'{len(_issues)} 筆；依嚴重度排序。高＝無紀錄、未遇、地點異常、排外服務。')
+            with _tab_all:
+                show_table(_result, hide_index=True, width='stretch', column_config=_cols)
+            with _tab_cg:
+                show_table(_att.by_caregiver(_result), hide_index=True, width='stretch')
+                st.caption('依排定居服員計算；排外服務算在實際打卡的居服員。用來看常態性遲到或漏打卡，不是考核分數。')
+            download_button_quiet('⬇️ 下載對照結果 CSV', export_frame(_result).to_csv(index=False).encode('utf-8-sig'),
+                                  '排定與實際對照.csv', 'text/csv', key='attendance_download')
+
+        _attendance_view()
 
         subhead('人工覆寫紀錄')
         _session_overrides = [{'任務ID': k, '目前居服員': caregiver_label(v.get('cg_id')) if v.get('cg_id') else '待安排', '原因': v.get('reason', '')}
@@ -4873,6 +5840,7 @@ if "last_result" in st.session_state:
         module_nav_buttons(M_REVIEW)
 
     # 自動存檔：作業內容有變動（排班、改派、插單、整案調整、改期…）就寫入本機資料庫。
+    _token = None
     try:
         _key_cols = [c for c in ['任務ID', '日期', '時間窗_開始', '時間窗_結束'] if c in res['df_tasks']]
         _token = session_store.change_token((
@@ -4891,9 +5859,27 @@ if "last_result" in st.session_state:
             st.session_state['_autosave_token'] = _token
             st.session_state['_autosave_at'] = _stamp
     except Exception as exc:
+        _log_error('自動存檔', exc)
         st.session_state['_autosave_at'] = None
         st.session_state['_autosave_error'] = str(exc)[:160]
+    # 復原上一步：班表狀態有變就記一步（請假紀錄、週計畫異動也算進去）
+    try:
+        _undo_blocks = _workflow_store.blocks()
+        _undo_token = session_store.change_token((_token, len(res.get('plan_version_log') or []),
+                                                  [(b['id'], b['start'], b['end']) for b in _undo_blocks],
+                                                  len(st.session_state.get('qualification_followups') or [])))
+        _undo.track(st.session_state, _undo_token, res.get('input_signature'),
+                    lambda: _undo.snapshot(st.session_state, res, _undo_blocks), _undo_blocks)
+    except Exception as exc:
+        _log_error('記錄復原步驟', exc)
     with _sidebar_status:
+        _undo_steps = st.session_state.get('_undo_stack') or []
+        if _undo_steps:
+            st.button(f"↩️ 復原上一步：{_undo_steps[-1]['label']}", key='undo_last', on_click=_undo_click, width='stretch',
+                      help=f"回到 {_undo_steps[-1]['at']} 這一步之前的班表。最多可以往回 {len(_undo_steps)} 步。")
+        _undo_note = st.session_state.pop('_undo_notice', None)
+        if _undo_note:
+            st.success('↩️ ' + _undo_note)
         if st.session_state.get('_autosave_at'):
             st.caption(f"💾 已自動存檔 {str(st.session_state['_autosave_at'])[11:16]}，重新整理可還原")
         elif st.session_state.get('_autosave_error'):

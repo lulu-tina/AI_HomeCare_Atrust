@@ -196,10 +196,19 @@ def _run_expanded_dispatch(tasks,caregivers,clients,config,primary_map=None,prog
             hard_results[key] = _check_hard_constraints(pd.Series(task) if isinstance(task,dict) else task,profile_rows[worker],cfg)
         return hard_results[key]
 
+    # 同一天的任務表在整次排班中是同一個物件；合併後資料、日期欄轉換只需算一次。
+    # set_times 會就地改時間，屆時清掉該天的暫存（見下方 set_times）。
+    day_scratch = {}
+
+    def evaluate(task,worker,current,cfg):
+        frame = days[task['日期']]
+        return _evaluate_reassignment(task['任務ID'],worker,frame,current,caregivers,cfg,
+                                      scratch=day_scratch.setdefault(id(frame),{}))
+
     def check_visit(task,worker,current,cfg):
         profile = profiles.get(worker)
         if profile is None:
-            return _evaluate_reassignment(task['任務ID'],worker,days[task['日期']],current,caregivers,cfg)
+            return evaluate(task,worker,current,cfg)
         hard = hard_check(task,worker,cfg)
         if hard:
             return {'available':False,'detail':hard,'reason':'hard_constraint'}
@@ -229,7 +238,7 @@ def _run_expanded_dispatch(tasks,caregivers,clients,config,primary_map=None,prog
             if error:
                 return {'available':False,'detail':error,'reason':'monthly_overtime'}
             return dict(cached)
-        result = _evaluate_reassignment(task['任務ID'],worker,days[task['日期']],current,caregivers,cfg)
+        result = evaluate(task,worker,current,cfg)
         if result['available'] and profile.get('常用交通工具')=='機車':
             checked_patterns[signature] = dict(result)
         return result
@@ -771,6 +780,7 @@ def _run_expanded_dispatch(tasks,caregivers,clients,config,primary_map=None,prog
             task_patterns[tid] = visit_pattern(rec)
             frame = days[rec['日期']]
             frame.loc[frame['任務ID'].eq(tid),['時間窗_開始','時間窗_結束']] = [start,end]
+            day_scratch.pop(id(frame),None)
             entry = config.dispatch_cache['days'][id(frame)]['lookup'].get(tid)
             if entry is not None:
                 entry['時間窗_開始'],entry['時間窗_結束'] = start,end

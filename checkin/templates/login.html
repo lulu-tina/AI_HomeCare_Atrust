@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block body %}
+<header><span class="brand">CareFlow 打卡</span></header>
+<main class="login">
+  <h1>居服員打卡</h1>
+  <p class="sub">第一次使用請輸入員工編號，這支手機就會綁定給你，以後打開就能直接打卡。</p>
+  {% if error %}<div class="msg err" role="alert">{{ error }}</div>{% endif %}
+  <form class="card" method="post" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <div class="field" style="margin-top:0">
+      <label for="cg">員工編號</label>
+      <input id="cg" name="cg" required autocapitalize="characters" spellcheck="false" inputmode="text" placeholder="例如 03816" autofocus>
+    </div>
+    <button class="btn btn-main" type="submit">開始使用</button>
+  </form>
+  <p class="hint">換了新手機，要等督導在 CareFlow 按「核准」才能打卡。<br>小技巧：用瀏覽器的「加到主畫面」，以後點圖示就能打卡。</p>
+</main>
+{% endblock %}

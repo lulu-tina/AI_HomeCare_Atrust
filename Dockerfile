@@ -7,5 +7,5 @@ RUN pip install -r requirements.txt
 COPY . .
 # 排班工作紀錄（sqlite）放在 /app/output_results，請用 volume 保存
 VOLUME ["/app/output_results"]
-EXPOSE 8501
+EXPOSE 8501 8600
 CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true", "--browser.gatherUsageStats=false"]

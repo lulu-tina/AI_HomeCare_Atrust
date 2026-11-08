@@ -1,0 +1,162 @@
+{% extends 'base.html' %}
+{% block body %}
+<header>
+  <span class="brand">CareFlow 打卡</span>
+  <form class="who" method="post" action="{{ url_for('logout') }}">
+    <span>{{ cg }}</span>
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <button type="submit">登出</button>
+  </form>
+</header>
+<main>
+  <h1>今天的班</h1>
+  <p class="sub">{{ day.strftime('%Y/%m/%d') }}（{{ weekday }}）· 共 {{ shifts|length }} 筆 · 到案家按「到勤打卡」，離開時按「離開打卡」</p>
+  {% if flash %}<div class="msg ok" role="status">{{ flash }}</div>{% endif %}
+  <div id="msg" class="msg" hidden role="status"></div>
+
+  {% if not shifts %}
+  <div class="card empty">今天沒有發布給你的班。<br>如果是臨時代班，請聯絡督導發布班表。</div>
+  {% endif %}
+
+  {% for s in shifts %}
+  <section class="card" data-task="{{ s.task_id }}" data-lat="{{ s.lat if s.lat is not none else '' }}" data-lon="{{ s.lon if s.lon is not none else '' }}">
+    <div class="row">
+      <div class="time">{{ s.start }}–{{ s.end }}</div>
+      <span class="pill s-{{ s.state }}">{{ s.state }}</span>
+    </div>
+    <div class="client">{{ s.client_label or '案家' }}　<span class="meta">{{ s.client_id }}</span></div>
+    {% if s.service %}<div class="meta">{{ s.service }}</div>{% endif %}
+
+    {% if s.punches %}
+    <ul class="log">
+      {% for kind in ['簽到', '簽退', '未遇'] if kind in s.punches %}{% set p = s.punches[kind] %}
+      <li>{{ {'簽到': '到勤', '簽退': '離開', '未遇': '未遇'}[kind] }} {{ p.at[11:16] }}{% if p.late_entry %} <span class="flag">補登・待審</span>{% endif %}{% if p.lat is none and not p.late_entry %} <span class="flag">無定位</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if s.state == '未開始' %}
+    <div class="actions">
+      <button class="btn btn-main" data-kind="簽到">到勤打卡</button>
+      <button class="btn btn-miss" data-kind="未遇">未遇</button>
+    </div>
+    {% elif s.state == '服務中' %}
+    <div class="actions">
+      <button class="btn btn-out btn-wide" data-kind="簽退">離開打卡</button>
+    </div>
+    {% endif %}
+
+    {% if s.state in ['未開始', '服務中'] %}
+    <div class="geo" aria-live="polite"></div>
+    <details>
+      <summary>忘記{{ '到勤' if s.state == '未開始' else '離開' }}打卡？補登</summary>
+      <form class="late" data-late="{{ '簽到' if s.state == '未開始' else '簽退' }}">
+        <div><label>實際時間</label><input type="time" name="at" required></div>
+        <div><label>&nbsp;</label><button class="btn btn-main" type="submit" style="width:100%;min-height:48px;padding:10px">送出補登</button></div>
+        <div class="full"><label>原因（必填）</label><input name="note" maxlength="200" required placeholder="例如：手機沒電"></div>
+      </form>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+</main>
+
+<script>
+(function () {
+  var CSRF = {{ csrf_token()|tojson }};
+  var PUNCH_URL = {{ url_for('punch')|tojson }}, LOGIN_URL = {{ url_for('login')|tojson }};
+  var msg = document.getElementById('msg');
+
+  function show(text, ok) {
+    msg.textContent = text;
+    msg.className = 'msg ' + (ok ? 'ok' : 'err');
+    msg.hidden = false;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  try {
+    var saved = sessionStorage.getItem('cf_msg');
+    if (saved) { sessionStorage.removeItem('cf_msg'); show(saved, true); }
+  } catch (e) {}
+
+  function metres(lat1, lon1, lat2, lon2) {
+    var r = Math.PI / 180, a = Math.sin((lat2 - lat1) * r / 2), b = Math.sin((lon2 - lon1) * r / 2);
+    var h = a * a + Math.cos(lat1 * r) * Math.cos(lat2 * r) * b * b;
+    return 12742000 * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+
+  function position() {
+    return new Promise(function (resolve) {
+      if (!navigator.geolocation) { resolve({ reason: '這個瀏覽器不支援定位' }); return; }
+      navigator.geolocation.getCurrentPosition(
+        function (p) { resolve({ lat: p.coords.latitude, lon: p.coords.longitude, accuracy: Math.round(p.coords.accuracy) }); },
+        function (e) {
+          var why = e.code === 1 ? '定位權限被拒絕，請到瀏覽器設定允許定位' : (e.code === 3 ? '定位逾時' : '取不到定位');
+          if (!window.isSecureContext) why = '網址不是 https，手機不給定位';
+          resolve({ reason: why });
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+    });
+  }
+
+  function send(card, payload, buttons) {
+    buttons.forEach(function (b) { b.disabled = true; });
+    var geo = card.querySelector('.geo');
+    if (geo && !payload.at) geo.textContent = '取得定位中…';
+    var where = payload.at ? Promise.resolve({ late: true }) : position();
+    return where.then(function (pos) {
+      if (geo && !pos.late) {
+        var lat = parseFloat(card.dataset.lat), lon = parseFloat(card.dataset.lon);
+        geo.textContent = pos.reason ? ('⚠ ' + pos.reason + '，仍會送出打卡') :
+          ('定位精度約 ' + pos.accuracy + ' 公尺' + (isFinite(lat) && isFinite(lon) ? '，距案家約 ' + Math.round(metres(pos.lat, pos.lon, lat, lon)) + ' 公尺' : ''));
+      }
+      payload.task_id = card.dataset.task;
+      payload.lat = pos.lat; payload.lon = pos.lon; payload.accuracy = pos.accuracy;
+      return fetch(PUNCH_URL, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify(payload)
+      });
+    }).then(function (res) {
+      if (res.redirected || res.status === 401) { location.href = LOGIN_URL; return; }
+      return res.json().then(function (data) {
+        if (data.ok) {
+          try { sessionStorage.setItem('cf_msg', data.message); } catch (e) {}
+          location.reload();
+        } else {
+          show(data.message || '打卡失敗', false);
+          buttons.forEach(function (b) { b.disabled = false; });
+        }
+      });
+    }).catch(function () {
+      show('連不上打卡主機，請確認網路後再按一次。', false);
+      buttons.forEach(function (b) { b.disabled = false; });
+    });
+  }
+
+  document.querySelectorAll('section[data-task]').forEach(function (card) {
+    var buttons = Array.prototype.slice.call(card.querySelectorAll('button[data-kind]'));
+    buttons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var kind = btn.dataset.kind;
+        if (kind === '未遇' && !btn.classList.contains('armed')) {
+          btn.classList.add('armed');
+          btn.textContent = '再按一次確認';
+          setTimeout(function () { btn.classList.remove('armed'); btn.textContent = '未遇'; }, 4000);
+          return;
+        }
+        send(card, { kind: kind }, buttons);
+      });
+    });
+    var late = card.querySelector('form[data-late]');
+    if (late) {
+      late.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        var submit = late.querySelector('button');
+        send(card, { kind: late.dataset.late, at: late.elements.at.value, note: late.elements.note.value },
+             buttons.concat([submit]));
+      });
+    }
+  });
+})();
+</script>
+{% endblock %}

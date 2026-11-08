@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#123f3c">
+<meta name="robots" content="noindex">
+<title>CareFlow 打卡</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="居服打卡">
+<style>
+:root{--ink:#173a38;--teal:#147d73;--teal-d:#0e665d;--mint:#e4f2ec;--sand:#f1b873;--muted:#5f7470;--line:#dde7e2;--card:#fff;--bg:#f6f8f5;--red:#b42318;--red-bg:#fdecea;--amber:#8a5300;--amber-bg:#fdf3e1}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif}
+header{background:#123f3c;color:#fff;padding:calc(14px + env(safe-area-inset-top)) 16px 14px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+header .brand{font-weight:700;letter-spacing:.02em}
+header .who{font-size:14px;color:#cfe6de;display:flex;align-items:center;gap:10px}
+header button{background:transparent;border:1px solid #ffffff55;color:#fff;border-radius:999px;padding:5px 12px;font:inherit;font-size:13px}
+main{max-width:560px;margin:0 auto;padding:16px 16px 48px}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 1px 2px rgba(23,58,56,.05)}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.time{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.client{font-size:17px;font-weight:600;margin-top:2px}
+.meta{color:var(--muted);font-size:14px;margin-top:2px;word-break:break-all}
+.pill{display:inline-block;border-radius:999px;padding:3px 10px;font-size:13px;font-weight:600;white-space:nowrap}
+.s-未開始{background:#eef2f1;color:var(--muted)}
+.s-服務中{background:var(--mint);color:var(--teal-d)}
+.s-已完成{background:var(--teal);color:#fff}
+.s-未遇{background:var(--amber-bg);color:var(--amber)}
+.log{margin:10px 0 0;padding:0;list-style:none;font-size:14px;color:var(--muted)}
+.log li{padding:2px 0}
+.log .flag{color:var(--amber);font-weight:600}
+.actions{display:grid;grid-template-columns:2fr 1fr;gap:10px;margin-top:14px}
+.btn{appearance:none;border:0;border-radius:12px;padding:15px 12px;font:inherit;font-weight:700;min-height:54px;cursor:pointer}
+.btn:disabled{opacity:.5}
+.btn-main{background:var(--teal);color:#fff}
+.btn-main:active{background:var(--teal-d)}
+.btn-out{background:var(--ink);color:#fff}
+.btn-miss{background:#fff;color:var(--amber);border:1.5px solid var(--sand)}
+.btn-miss.armed{background:var(--amber);color:#fff;border-color:var(--amber)}
+.btn-wide{grid-column:1/-1}
+details{margin-top:12px;font-size:15px}
+summary{color:var(--muted);cursor:pointer;padding:4px 0}
+.late{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.late .full{grid-column:1/-1}
+input,select{font:inherit;font-size:17px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);width:100%}
+label{font-size:14px;color:var(--muted);display:block;margin-bottom:4px}
+.msg{border-radius:12px;padding:12px 14px;margin-bottom:14px;font-weight:600}
+.msg.ok{background:var(--mint);color:var(--teal-d)}
+.msg.err{background:var(--red-bg);color:var(--red)}
+.empty{text-align:center;color:var(--muted);padding:36px 16px}
+.geo{font-size:13px;color:var(--muted);margin-top:8px;min-height:1.2em}
+.login{max-width:380px;margin:9vh auto 0}
+.login .card{padding:22px}
+.login .btn{width:100%;margin-top:16px}
+.field{margin-top:14px}
+.hint{font-size:13px;color:var(--muted);margin-top:16px;text-align:center}
+</style>
+</head>
+<body>
+{% block body %}{% endblock %}
+</body>
+</html>

@@ -273,6 +273,12 @@ class PipelineConfig:
     # 跨月回溯種子：{居服員ID:{日期字串,...}}，由呼叫端（app.py）從 WorkflowStore 讀取並指派，
     # 供 find_insertion_candidates／人工改派提醒使用；AI 批次排班用 worker_workdays 本身即可。
     worker_workday_seed: dict = field(default_factory=dict, repr=False)
+    # 執行對照（attendance_reconcile）：排定 vs 打卡／服務紀錄的判定容許值。
+    attendance_late_grace_mins: float = 10.0          # 簽到晚於排定開始超過此分鐘 → 遲到
+    attendance_early_leave_grace_mins: float = 10.0   # 簽退早於排定結束超過此分鐘 → 早退
+    attendance_short_ratio: float = 0.9               # 實際服務分鐘低於排定的此比例 → 時數不足
+    attendance_match_window_mins: float = 180.0       # 沒有任務ID時，打卡與排定時間相差多少分鐘內才配對
+    attendance_gps_radius_m: float = 300.0            # 打卡位置離案家超過此公尺 → 地點異常
 
 # ==========================================
 # 資料載入
@@ -355,10 +361,29 @@ _SERVICE_CODE_KEY = re.compile(r'^Service_Code_(\d+)(?:_[xy])?$')
 _SERVICE_COLUMN = re.compile(r'^(?:Service_Code|Units)_\d+(?:_[xy])?$')
 
 
+_SERVICE_INDEX_MEMO = {}
+
+
+def _service_code_indices(keys):
+    keys = tuple(keys)
+    found = _SERVICE_INDEX_MEMO.get(keys)
+    if found is None:
+        found = sorted({int(m[1]) for key in keys
+                        if isinstance(key, str) and key.startswith('Service_Code_')
+                        and (m := _SERVICE_CODE_KEY.match(key))})
+        if len(_SERVICE_INDEX_MEMO) > 256:
+            _SERVICE_INDEX_MEMO.clear()
+        _SERVICE_INDEX_MEMO[keys] = found
+    return found
+
+
 def iter_service_codes(row):
-    indices = sorted({int(m[1]) for key in row.keys()
-                      if isinstance(key, str) and key.startswith('Service_Code_')
-                      and (m := _SERVICE_CODE_KEY.match(key))})
+    try:
+        indices = _service_code_indices(row.keys())
+    except TypeError:
+        indices = sorted({int(m[1]) for key in row.keys()
+                          if isinstance(key, str) and key.startswith('Service_Code_')
+                          and (m := _SERVICE_CODE_KEY.match(key))})
     for index in indices:
         code = _get_task_field(row, f'Service_Code_{index}')
         if code is not None:
@@ -1025,7 +1050,7 @@ def google_key_is_configured():
 def begin_travel_query_run(max_queries=12000):
     # count 以 route-matrix element 計，不是 HTTP request 數。
     # 僅當次計算共用，不跨使用者／排班批次共用。
-    _GOOGLE_QUERY_STATE.set({'count': 0, 'limit': int(max_queries), 'memo': {}})
+    _GOOGLE_QUERY_STATE.set({'count': 0, 'limit': int(max_queries), 'memo': {}, 'fallback_pairs': set()})
 
 
 def _google_query_state():
@@ -1168,7 +1193,6 @@ def near_walk_minutes(lat1, lon1, lat2, lon2):
 # Google TRANSIT 對「一、兩公里內的短程」常回查無路線（步行或轉乘都不划算），固定人選就被誤判成「無法確認交通」。
 # 查無路線時的備案（會標示為估算）：直線≤walk_max_m 用步行；更遠用機車路網時間×係數＋候車分鐘當作公車／捷運近似。
 TRANSIT_FALLBACK = {'enabled': True, 'walk_max_m': 2000.0, 'motor_factor': 1.5, 'wait_min': 10.0}
-_FALLBACK_PAIRS: set = set()
 # 每位使用者（每個網頁連線）各自的「查無路線改用估算」開關。網頁每次重跑都會設定；
 # 沒設定時（例如命令列或測試）沿用 TRANSIT_FALLBACK['enabled']。避免一個人關掉，其他人正在排的班也被關掉。
 _TRANSIT_FALLBACK_ON = ContextVar("careflow_transit_fallback", default=None)
@@ -1211,7 +1235,8 @@ def transit_fallback_minutes(lat1, lon1, lat2, lon2, travel_min_per_km=3.0):
 
 
 def transit_fallback_used(lat1, lon1, lat2, lon2):
-    return _pair_key(lat1, lon1, lat2, lon2) in _FALLBACK_PAIRS
+    # 只看「這次排班」用過估算的路段；不跨使用者共用（舊版是全站共用的集合，別人用估算會讓你的班表也被標成估算）
+    return _pair_key(lat1, lon1, lat2, lon2) in _google_query_state().setdefault('fallback_pairs', set())
 
 
 def _google_transit_key(lat1, lon1, lat2, lon2, departure=None, arrival=None):
@@ -1500,7 +1525,7 @@ def get_google_travel_time(lat1, lon1, lat2, lon2, transport_mode,
     if not np.isfinite(minutes):
         fallback = transit_fallback_minutes(lat1, lon1, lat2, lon2, travel_min_per_km)
         if fallback is not None:
-            _FALLBACK_PAIRS.add(_pair_key(lat1, lon1, lat2, lon2))
+            state.setdefault('fallback_pairs', set()).add(_pair_key(lat1, lon1, lat2, lon2))
             return fallback
     return minutes
 
@@ -2259,7 +2284,13 @@ def _month_totals_memo(cg_id, day, other_tasks, other_assignments, caregivers, c
         cols = [c for c in ('任務ID', '日期', '時間窗_開始', '時間窗_結束', '案家ID', '服務地點_緯度', '服務地點_經度') if c in other_tasks]
         rows = tuple(map(tuple, other_tasks[cols].astype(str).to_numpy()))
         who = tuple(sorted(other_assignments['任務ID'].astype(str)))
-        key = (str(cg_id), day.strftime('%Y-%m-%d'), home, rows, who, float(config.buffer_mins), float(config.travel_min_per_km))
+        # 交通設定也要在鍵裡：不同使用者可能用不同交通主機、或開／關「大眾運輸查無路線改用估算」，不能互相沿用
+        try:
+            host = osrm_endpoint()
+        except Exception:
+            host = ''
+        key = (str(cg_id), day.strftime('%Y-%m-%d'), home, rows, who, float(config.buffer_mins), float(config.travel_min_per_km),
+               host, transit_fallback_enabled(), bool(_GOOGLE_ALLOWED.get()))
         hit = _LEDGER_MEMO.get(key)
         if hit is not None:
             return dict(hit)
@@ -4490,7 +4521,7 @@ def identity_display(frame, caregivers=None, clients=None):
     if not isinstance(frame,pd.DataFrame):return frame
     caregivers,clients = caregivers or {},clients or {}
     out=frame.copy()
-    caregiver_cols={'居服員ID','居服員','編號','派單居服員','原派居服員','新派居服員','最終派單居服員','AI建議居服員','歷史首選居服員ID','請假居服員'}
+    caregiver_cols={'居服員ID','居服員','編號','派單居服員','原派居服員','新派居服員','最終派單居服員','AI建議居服員','歷史首選居服員ID','請假居服員','排定居服員','實際居服員'}
     client_cols={'案家ID','案號','內部案號','起點案號'}
     for col in out.columns:
         mapping = caregivers if col in caregiver_cols else (clients if col in client_cols else None)

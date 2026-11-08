@@ -6,3 +6,7 @@ openpyxl>=3.1,<4
 requests>=2.31,<3
 matplotlib>=3.8,<4
 seaborn>=0.13,<0.14
+flask>=3.0,<4
+waitress>=3.0,<4
+cryptography>=42  # 打卡網頁 --https 自簽憑證
+segno>=1.5,<2           # 打卡網址 QR Code（純 Python）

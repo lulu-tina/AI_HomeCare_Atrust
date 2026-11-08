@@ -21,11 +21,15 @@ def test_affected_only_uncertified_from_effective_date():
     assert [a['任務ID'] for a in out] == ['t2', 't4']      # t1 早於生效日、t3 已是有證照的 B、x1 是別的案家
 
 
-def test_split_by_method():
+def test_split_never_keeps_uncertified_worker():
+    # 法規：只能派給有訓練的人，三種方式都把全部受影響服務改派，沒有「寬限期內繼續服務」
     aff = [{'任務ID': t, '日期': d} for t, d in [('t1', '2026-11-02'), ('t2', '2026-11-09'), ('t3', '2026-12-07')]]
-    assert qr.split('grace', aff, '2026-11-30') == {'keep': ['t1', 't2'], 'accompany': [], 'move': ['t3']}
-    assert qr.split('handover', aff, handover=1) == {'keep': ['t1'], 'accompany': ['t1'], 'move': ['t2', 't3']}
-    assert qr.split('now', aff)['move'] == ['t1', 't2', 't3']
+    for method in qr.METHODS:
+        parts = qr.split(method, aff, '2026-11-30', handover=1)
+        assert parts['move'] == ['t1', 't2', 't3'] and parts['keep'] == [] and parts['accompany'] == []
+    assert qr.split('handover', aff, handover=2)['escort'] == ['t1', 't2']    # 原居服員陪同、不提供服務
+    assert qr.split('grace', aff, '2026-11-30')['escort'] == []
+    assert qr.DEFAULT_METHOD == 'now' and qr.METHODS[0] == 'now'
 
 
 def test_covering_needs_every_task_and_ranks_by_average_position():
@@ -35,10 +39,9 @@ def test_covering_needs_every_task_and_ranks_by_average_position():
     assert qr.covering(avail, []) == []
 
 
-def test_team_after_each_method():
-    assert qr.team_after('grace', 'A', ['D'], 'B') == ('A', ['B', 'D'])
-    assert qr.team_after('handover', 'A', ['D'], 'B') == ('B', ['A', 'D'])
-    assert qr.team_after('now', 'A', ['D', 'B'], 'B') == ('B', ['D'])
+def test_team_after_removes_uncertified_owner():
+    for method in qr.METHODS:
+        assert qr.team_after(method, 'A', ['D', 'B'], 'B') == ('B', ['D'])
 
 
 def test_foot_care_need_uses_ba08_training():
@@ -48,6 +51,9 @@ def test_foot_care_need_uses_ba08_training():
     assert [a['任務ID'] for a in out] == ['t1']
     row = qr.followup('grace', 'C1', 'A', 'F', qr.split('grace', out, '2026-12-31'), '2026-12-31', need='foot')
     assert '足部照護 10 小時' in row['待辦'] and 'BA08' in row['提醒'] and row['需求變更'].startswith('新增足部照護')
+    assert '已改由 F 服務' in row['待辦'] and row['改由有訓練者服務'] == 1
+    row = qr.followup('handover', 'C1', 'A', 'F', qr.split('handover', out, handover=1), need='foot')
+    assert row['原居服員陪同'] == 1 and '不提供服務' in row['待辦']
 
 
 def test_split_cover_by_weekday_when_nobody_takes_all():

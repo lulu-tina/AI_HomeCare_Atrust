@@ -3,7 +3,7 @@ CAREFLOW_BUILD = '2026.10.18-v19'
 import pathlib, unittest
 import pandas as pd
 
-HERE = pathlib.Path(__file__).resolve().parent
+HERE = pathlib.Path(__file__).resolve().parent.parent   # 專案根目錄（測試檔在 tests/）
 CODES = ['BA14', 'BA13', 'BA09', 'GA09', 'BA15', 'BA17A']
 EX1 = ("請問貴單位有人力嗎？ 姓名：劉O 性別/年齡：女性82歲 地址：新北市中和區大智街106巷O號 失能等級：3 失智：X 身障：X 身高/體重：155/62"
        "服務時間及項目：10/2(五)08:20~11:20 BA14+BA133 聯合醫院昆明院區概況簡述：… 備註：1.女性居服員，須注意個案外出就醫安全2.個案有敬老優先權，看診及領藥皆可優先安排")

@@ -102,7 +102,7 @@ class StampTests(unittest.TestCase):
         import pathlib
         from build_info import CAREFLOW_BUILD as build, REQUIRED_MODULES
         self.assertEqual(build, CAREFLOW_BUILD)
-        here = pathlib.Path(__file__).resolve().parent
+        here = pathlib.Path(__file__).resolve().parent.parent   # 專案根目錄（測試檔在 tests/）
         for name in REQUIRED_MODULES + ('build_info',):
             self.assertIn("CAREFLOW_BUILD = '%s'" % build, (here / f'{name}.py').read_text(encoding='utf-8'), name)
 

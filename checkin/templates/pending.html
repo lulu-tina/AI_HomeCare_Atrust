@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block body %}
+<header><span class="brand">CareFlow 打卡</span></header>
+<main class="login">
+  {% if rejected %}
+  <h1>這支手機沒有通過</h1>
+  <div class="card empty">員工編號 {{ device.caregiver_id }} 的這支手機（{{ device.label }}）沒有被核准，或已被督導解除。<br>請聯絡督導。</div>
+  <form method="get" action="{{ url_for('login') }}"><button class="btn btn-main" type="submit" style="width:100%;margin-top:14px">重新輸入員工編號</button></form>
+  {% else %}
+  <h1>等督導核准</h1>
+  <div class="card">
+    <p style="margin-top:0">員工編號 <b>{{ device.caregiver_id }}</b> 已經綁定另一支手機，這支新手機（{{ device.label }}）要督導核准後才能打卡。</p>
+    <p class="sub" style="margin-bottom:0">請用 LINE 或電話通知督導。核准後這個畫面會自動進到今天的班，不用重新輸入。</p>
+  </div>
+  <p class="hint" id="wait">等待中…</p>
+  <script>
+  (function () {
+    var url = {{ url_for('device_status')|tojson }}, home = {{ url_for('pending')|tojson }}, n = 0;
+    setInterval(function () {
+      n += 1; document.getElementById('wait').textContent = '等待中…（已等 ' + (n * 5) + ' 秒）';
+      fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.status !== 'pending') location.href = home;
+      }).catch(function () {});
+    }, 5000);
+  })();
+  </script>
+  {% endif %}
+</main>
+{% endblock %}

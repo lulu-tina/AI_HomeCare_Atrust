@@ -12,6 +12,7 @@ from dispatch_workflow import WorkflowStore
 
 def test_full_month_save_and_next_month_reuse(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CAREFLOW_AUTH', 'off')
     monkeypatch.setenv('CAREFLOW_AGENCY_DIR', str(tmp_path))
     monkeypatch.setattr(engine, 'calc_travel_minutes', lambda *a, **k: 5.0)
     monkeypatch.setattr(engine, 'prefetch_osrm_travel_times', lambda *a, **k: None)
@@ -100,6 +101,7 @@ def test_full_month_save_and_next_month_reuse(tmp_path, monkeypatch):
 
 def test_pending_clients_bulk_apply_resolves_all_weeks(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CAREFLOW_AUTH', 'off')
     monkeypatch.setenv('CAREFLOW_AGENCY_DIR', str(tmp_path))
     monkeypatch.setattr(engine,'calc_travel_minutes',lambda *a,**k:5.0)
     monkeypatch.setattr(engine,'prefetch_osrm_travel_times',lambda *a,**k:None)

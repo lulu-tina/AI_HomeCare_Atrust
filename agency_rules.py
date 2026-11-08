@@ -124,14 +124,24 @@ def monthly_overtime_error(cg_id, day, working_minutes, config, caregiver=None):
 def consecutive_run_before(workdays, day):
     """回傳 day（'YYYY-MM-DD'）之前、不中斷的已上班天數。workdays 為該居服員已知上班日期字串集合
     （跨月持久種子＋本次已排），day 當天本身不計入。"""
-    day = pd.to_datetime(day, errors='coerce')
-    if pd.isna(day):
+    if not workdays:
         return 0
-    cursor = day - pd.Timedelta(days=1)
+    import datetime as _dt
+    try:
+        cursor = _dt.date.fromisoformat(str(day)[:10]) if isinstance(day, str) else None
+    except ValueError:
+        cursor = None
+    if cursor is None:
+        ts = pd.to_datetime(day, errors='coerce')
+        if pd.isna(ts):
+            return 0
+        cursor = ts.date()
+    one = _dt.timedelta(days=1)
+    cursor -= one
     streak = 0
-    while cursor.strftime('%Y-%m-%d') in workdays:
+    while cursor.isoformat() in workdays:
         streak += 1
-        cursor -= pd.Timedelta(days=1)
+        cursor -= one
     return streak
 
 

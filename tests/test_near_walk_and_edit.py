@@ -55,7 +55,7 @@ class BuildStampTests(unittest.TestCase):
     def test_all_required_modules_carry_the_same_build(self):
         import pathlib
         from build_info import CAREFLOW_BUILD, REQUIRED_MODULES
-        folder = pathlib.Path(__file__).resolve().parent
+        folder = pathlib.Path(__file__).resolve().parent.parent   # 專案根目錄（測試檔在 tests/）
         for name in REQUIRED_MODULES:
             text = (folder / (name + '.py')).read_text(encoding='utf-8')
             self.assertIn("CAREFLOW_BUILD = '%s'" % CAREFLOW_BUILD, text, name)
