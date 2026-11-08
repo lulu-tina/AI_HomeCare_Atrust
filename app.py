@@ -5713,15 +5713,26 @@ if "last_result" in st.session_state:
             _k[3].metric('未遇', int(_cnt.get('未遇', 0)))
             _k[4].metric('逾時未到勤', int(_cnt.get('逾時未到勤', 0)), help='已過開始時間 15 分鐘還沒按到勤打卡；可打電話確認。')
             _icon = {'未開始': '⚪ 還沒到', '服務中': '🟢 服務中', '已完成': '✅ 已完成', '未遇': '🟠 未遇', '逾時未到勤': '🔴 逾時未到勤'}
+            def _when(t, metres):
+                if not t:
+                    return ''
+                if metres is None or pd.isna(metres):
+                    return t
+                return f"{t}（{'⚠️ ' if metres > 300 else ''}距案家 {int(metres):,} 公尺）"
             show_table(pd.DataFrame({
                 '時段': _board['時段'], '居服員': _board['居服員ID'].map(caregiver_label), '案家': _board['案家ID'].map(lambda c: '🎬 示範案家' if c == 'DEMO' else client_label(c)),
-                '狀態': _board['狀態'].map(lambda v: _icon.get(v, v)), '到勤': _board['到勤'], '離開': _board['離開'],
-                '距案家': _board['距案家(公尺)'].map(lambda v: '' if pd.isna(v) else f'{int(v)} 公尺'),
-                '打卡位置': _board['打卡位置'], '提醒': _board['提醒']}),
+                '狀態': _board['狀態'].map(lambda v: _icon.get(v, v)),
+                '到勤': [_when(t, m) for t, m in zip(_board['到勤'], _board['距案家(公尺)'])], '到勤位置': _board['打卡位置'],
+                '離開': [_when(t, m) for t, m in zip(_board['離開'], _board['離開距案家(公尺)'])], '離開位置': _board['離開位置'],
+                '提醒': _board['提醒']}),
                 hide_index=True, width='stretch', height=min(560, 38 + 35 * len(_board)),
-                column_config={'打卡位置': st.column_config.LinkColumn('打卡位置', display_text='📍 地圖', width='small',
-                                                                   help='到勤打卡時手機的位置，點開用 Google 地圖看')})
-            st.caption('距案家：到勤打卡時手機位置和案家座標的距離，超過 300 公尺請留意。整段期間的遲到、早退、缺卡統計請看下方「執行對照」。')
+                column_config={'到勤位置': st.column_config.LinkColumn('到勤位置', display_text='📍 到勤地圖', width='small',
+                                                                   help='按「到勤打卡」時手機的位置，點開用 Google 地圖看'),
+                               '離開位置': st.column_config.LinkColumn('離開位置', display_text='📍 離開地圖', width='small',
+                                                                   help='按「離開打卡」時手機的位置，點開用 Google 地圖看'),
+                               '到勤': st.column_config.TextColumn(width='medium'), '離開': st.column_config.TextColumn(width='medium')})
+            st.caption('到勤、離開後面括號是打卡時手機位置和案家座標的距離，超過 300 公尺會標 ⚠️。'
+                       '「到勤地圖」「離開地圖」分別是兩次打卡的位置。整段期間的遲到、早退、缺卡統計請看下方「執行對照」。')
 
         _checkin_panel()
 

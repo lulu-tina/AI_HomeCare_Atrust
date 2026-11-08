@@ -415,7 +415,14 @@ def _metres(lat1, lon1, lat2, lon2):
     return 12742000 * math.asin(min(1.0, math.sqrt(a)))
 
 
-BOARD_COLUMNS = ['任務ID', '時段', '案家ID', '居服員ID', '狀態', '到勤', '離開', '距案家(公尺)', '打卡位置', '提醒']
+BOARD_COLUMNS = ['任務ID', '時段', '案家ID', '居服員ID', '狀態', '到勤', '離開', '距案家(公尺)', '打卡位置',
+                 '離開距案家(公尺)', '離開位置', '提醒']
+
+
+def _map_link(punch):
+    if punch and punch['lat'] is not None and punch['lon'] is not None:
+        return f"https://www.google.com/maps?q={punch['lat']:.6f},{punch['lon']:.6f}"
+    return ''
 
 
 def day_board(day, path=None, moment=None, late_grace_mins=15):
@@ -448,8 +455,14 @@ def day_board(day, path=None, moment=None, late_grace_mins=15):
             distance = round(_metres(first['lat'], first['lon'], s['lat'], s['lon']))
         if any(p['late_entry'] for p in mine):
             notes.append('補登待審')
+        leave = kinds.get('簽退')
+        leave_distance = None
+        if leave and leave['lat'] is not None and s['lat'] is not None and s['lon'] is not None:
+            leave_distance = round(_metres(leave['lat'], leave['lon'], s['lat'], s['lon']))
         if first and first['lat'] is None and not first['late_entry']:
-            notes.append('無定位')
+            notes.append('到勤無定位')
+        if leave and leave['lat'] is None and not leave['late_entry']:
+            notes.append('離開無定位')
         for p in mine:
             if p['note'] and p['kind'] != '未遇':
                 notes.append(p['note'])
@@ -458,8 +471,9 @@ def day_board(day, path=None, moment=None, late_grace_mins=15):
                      '到勤': kinds['簽到']['at'][11:16] if '簽到' in kinds else '',
                      '離開': kinds['簽退']['at'][11:16] if '簽退' in kinds else '',
                      '距案家(公尺)': distance,
-                     '打卡位置': (f"https://www.google.com/maps?q={first['lat']:.6f},{first['lon']:.6f}"
-                                  if first and first['lat'] is not None and first['lon'] is not None else ''),
+                     '打卡位置': _map_link(first),
+                     '離開距案家(公尺)': leave_distance,
+                     '離開位置': _map_link(leave),
                      '提醒': '、'.join(notes)})
     return pd.DataFrame(rows, columns=BOARD_COLUMNS)
 

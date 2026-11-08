@@ -141,7 +141,8 @@ def test_checkin_panel_external_url_and_reset_all_pins(tmp_path, monkeypatch):
     assert store.add_punch('A', demo[0]['task_id'], '簽到', lat=25.04, lon=121.53, path=db)[0]
     app.button(key='checkin_board_refresh').click().run() if False else app.run()
     assert not app.exception, [e.message for e in app.exception]
-    board = [t for t in app.dataframe if '打卡位置' in t.value.columns]
-    assert board and board[-1].value['打卡位置'].astype(str).str.contains('google.com/maps').any()
+    board = [t for t in app.dataframe if '到勤位置' in t.value.columns]
+    assert board and board[-1].value['到勤位置'].astype(str).str.contains('google.com/maps').any()
+    assert '離開位置' in board[-1].value.columns
     app.button(key='checkin_demo_clear').click().run()
     assert not [s for s in store.shifts_for('A', date.today(), db) if s['task_id'].startswith('DEMO-')]

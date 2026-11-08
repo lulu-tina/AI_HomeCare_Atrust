@@ -63,6 +63,14 @@ def test_day_board_states_distance_and_overdue(db):
     early = store.day_board(today, path=db, moment=moment.replace(hour=15, minute=5)).set_index('任務ID')
     assert early.loc['T3', '狀態'] == '未開始'
     assert store.day_board(date(2000, 1, 1), path=db).empty
+    # 離開打卡另外記位置與距離，和到勤分開
+    assert store.add_punch('E001', 'T1', '簽退', lat=25.02, lon=121.5, path=db)[0]
+    done = store.day_board(today, path=db, moment=moment).set_index('任務ID')
+    assert done.loc['T1', '打卡位置'].endswith('25.001000,121.500000')
+    assert done.loc['T1', '離開位置'].endswith('25.020000,121.500000')
+    assert done.loc['T1', '離開距案家(公尺)'] > done.loc['T1', '距案家(公尺)']
+    assert store.add_punch('E002', 'T3', '簽到', path=db)[0]
+    assert '到勤無定位' in store.day_board(today, path=db, moment=moment).set_index('任務ID').loc['T3', '提醒']
 
 
 def test_phone_page_uses_plain_words_and_proxy_prefix(db):
