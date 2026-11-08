@@ -13,6 +13,7 @@
   <p class="sub">{{ day.strftime('%Y/%m/%d') }}（{{ weekday }}）· 共 {{ shifts|length }} 筆 · 到案家按「到勤打卡」，離開時按「離開打卡」</p>
   {% if flash %}<div class="msg ok" role="status">{{ flash }}</div>{% endif %}
   <div id="msg" class="msg" hidden role="status"></div>
+  <div id="geo-warn" class="msg err" hidden role="alert"></div>
 
   {% if not shifts %}
   <div class="card empty">今天沒有發布給你的班。<br>如果是臨時代班，請聯絡督導發布班表。</div>
@@ -78,6 +79,19 @@
     if (saved) { sessionStorage.removeItem('cf_msg'); show(saved, true); }
   } catch (e) {}
 
+  // 一進頁面就先檢查能不能定位，不要等打卡後才發現（打卡後畫面會重新整理，提示一閃即逝）
+  var warn = document.getElementById('geo-warn');
+  function warnGeo(text) { warn.textContent = '⚠ ' + text; warn.hidden = false; }
+  if (!window.isSecureContext) {
+    warnGeo('這個網址是 http，手機不允許定位，打卡會記成「無定位」。請督導到 04 頁按「🌐 產生外部網址」，改用 https 開頭的網址或新的 QR Code。');
+  } else if (!navigator.geolocation) {
+    warnGeo('這個瀏覽器不支援定位，請改用手機內建的 Chrome 或 Safari 開啟。');
+  } else if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'geolocation' }).then(function (st) {
+      if (st.state === 'denied') warnGeo('定位權限被關閉。請到手機「設定 → 瀏覽器（Chrome／Safari）→ 位置」改成允許，再重新開這個頁面。');
+    }).catch(function () {});
+  }
+
   function metres(lat1, lon1, lat2, lon2) {
     var r = Math.PI / 180, a = Math.sin((lat2 - lat1) * r / 2), b = Math.sin((lon2 - lon1) * r / 2);
     var h = a * a + Math.cos(lat1 * r) * Math.cos(lat2 * r) * b * b;
@@ -103,7 +117,9 @@
     var geo = card.querySelector('.geo');
     if (geo && !payload.at) geo.textContent = '取得定位中…';
     var where = payload.at ? Promise.resolve({ late: true }) : position();
+    var noGeo = '';
     return where.then(function (pos) {
+      noGeo = pos.reason || '';
       if (geo && !pos.late) {
         var lat = parseFloat(card.dataset.lat), lon = parseFloat(card.dataset.lon);
         geo.textContent = pos.reason ? ('⚠ ' + pos.reason + '，仍會送出打卡') :
@@ -120,7 +136,8 @@
       if (res.redirected || res.status === 401) { location.href = LOGIN_URL; return; }
       return res.json().then(function (data) {
         if (data.ok) {
-          try { sessionStorage.setItem('cf_msg', data.message); } catch (e) {}
+          var text = data.message + (noGeo ? '（這次沒有記到定位：' + noGeo + '）' : '');
+          try { sessionStorage.setItem('cf_msg', text); } catch (e) {}
           location.reload();
         } else {
           show(data.message || '打卡失敗', false);

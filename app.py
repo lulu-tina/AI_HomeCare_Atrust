@@ -8,7 +8,7 @@
 
     01 資料匯入與排班設定：Excel 匯入、排班期間、交通方式、排班規則及限制條件、
        服務碼組合檢查與資料表編輯。
-    02 智慧排班作業：AI 自動排班、日曆班表、人工調整、個案與居服員媒合與候選人推薦。
+    02 智慧排班作業：AI 自動排班、日曆班表、以居服員為主軸排班（進階模式另有人工調整與媒合明細）。
     03 衝突與異常處理：班次重疊、轉場不足、未成功派班、條件不符的分類與明細；
        未派案家整案處理（替代方案）；臨時異動（新增、請假、改期、延遲）。
     04 排班結果與覆核：排班完成率、已排與未排班次、警示案件、最終班表與匯出、
@@ -574,12 +574,18 @@ with st.sidebar:
     _module = st.radio('功能模組', MODULE_KEYS, key='cf_module', label_visibility='collapsed',
                        format_func=lambda k: module_label(k, _module_badge(k)))
     st.caption('01→04 依排班流程操作；05 為主管管理分析，不影響班表。')
+    _advanced = st.toggle('🛠️ 進階模式', key='ui_advanced',
+                          help='預設是「居督模式」，只顯示日常排班要用的功能。打開後會多出：交通主機設定、排班規則滑桿、'
+                               '演算法明細與適配分數、臨時異動示範案例、資料表編輯、人工搜尋改派等，給主管或資訊人員使用。')
+    st.caption('目前：進階模式（主管／資訊人員）' if _advanced else '目前：居督模式（精簡畫面）')
     st.divider()
     _sidebar_wake = st.container()
     _sidebar_status = st.container()
     _sidebar_privacy = st.container()
     _errs = _session_errors()
-    if _errs:
+    if _errs and not _advanced:
+        st.caption(f'⚠️ 本次有 {len(_errs)} 個系統錯誤；要回報時，打開「進階模式」可看到錯誤代碼。')
+    if _errs and _advanced:
         with st.expander(f'⚠️ 本次作業有 {len(_errs)} 個錯誤（給資訊人員）'):
             st.caption('畫面上已用白話說明，這裡是給資訊人員追查用的代碼。回報問題時請附上代碼或下載紀錄檔。')
             for _e in reversed(_errs[-8:]):
@@ -621,7 +627,7 @@ if _wake_state in ('idle', 'stale') or (_wake_state == 'failed' and not st.sessi
     traffic_wake.start(_osrm_host)
 st.session_state['_osrm_auto_wake'] = True
 with _sidebar_wake:
-    traffic_wake.panel(_osrm_host, 'sidebar', compact=True)
+    traffic_wake.panel(_osrm_host, 'sidebar', compact=True, light=not _advanced)
 import caregiver_engine as _engine_mod
 # 只設定「這個連線」的開關，不改全站共用的預設值（見 caregiver_engine.set_transit_fallback_enabled）。
 _engine_mod.set_transit_fallback_enabled(bool(st.session_state['transit_fallback_enabled']))
@@ -642,6 +648,16 @@ skill_bonus = defaults.cert_bonus_dementia
 def render_dispatch_settings():
     """01 模組：交通方式、排班規則及限制條件（值已在頁首讀入，這裡只負責顯示與調整）。"""
     subhead('交通方式與排班規則')
+    if not _advanced:
+        with st.container(border=True):
+            traffic_wake.panel(_OSRM_CHOICES[st.session_state['osrm_source_choice']], 'settings', light=True)
+            st.markdown(
+                f"- 可服務時段 08:00～21:00；服務加轉場總工時每日上限 {max_daily_hours:g} 小時，超過 8 小時計加班\n"
+                f"- 月加班上限 {max_monthly_ot:g} 小時；不得連續上班超過規定天數\n"
+                "- 必要證照、性別指定、可服務星期、請假、交通與休息皆為硬性條件\n"
+                "- 隔週服務以生效日所在週起算，每隔一週安排")
+            st.caption('交通主機、轉場緩衝、車程扣分等設定由主管在側欄打開「🛠️ 進階模式」後調整。')
+        return
     _transport_col, _rule_col = st.columns(2, gap='large')
     with _transport_col.container(border=True):
         st.markdown('**🛵 交通方式**')
@@ -994,16 +1010,17 @@ with _sidebar_privacy.expander("🔒 個資顯示設定", expanded=False):
             "畫面可顯示遮罩姓名；匯出仍可選擇代碼版或遮罩姓名版。"
         )
 
-with _sidebar_privacy.expander("🧾 存取稽核紀錄", expanded=False):
-    st.caption('匯入、開啟姓名、覆寫、請假、匯出、資料刪除都會記錄；只記 ID 與筆數，不記姓名與地址。'
-               '紀錄只能附加，每筆帶前一筆的雜湊，可檢查有沒有被改過。')
-    if st.button('檢查並顯示最近 50 筆', key='audit_show', width='stretch'):
-        _audit_state = audit_log.verify()
-        if _audit_state['ok']:
-            st.success(f"共 {_audit_state['count']} 筆，雜湊鏈完整。")
-        else:
-            st.error(f"第 {_audit_state['first_bad_seq']} 筆起雜湊不一致，紀錄可能被修改，請通報機構負責人。")
-        st.dataframe(audit_log.as_table(50), hide_index=True, width='stretch')
+if _advanced:
+    with _sidebar_privacy.expander("🧾 存取稽核紀錄", expanded=False):
+        st.caption('匯入、開啟姓名、覆寫、請假、匯出、資料刪除都會記錄；只記 ID 與筆數，不記姓名與地址。'
+                   '紀錄只能附加，每筆帶前一筆的雜湊，可檢查有沒有被改過。')
+        if st.button('檢查並顯示最近 50 筆', key='audit_show', width='stretch'):
+            _audit_state = audit_log.verify()
+            if _audit_state['ok']:
+                st.success(f"共 {_audit_state['count']} 筆，雜湊鏈完整。")
+            else:
+                st.error(f"第 {_audit_state['first_bad_seq']} 筆起雜湊不一致，紀錄可能被修改，請通報機構負責人。")
+            st.dataframe(audit_log.as_table(50), hide_index=True, width='stretch')
 
 # 僅在資料來源變更時（首次載入／換檔案／原檔被覆寫）重設編輯區，避免使用者的編輯內容被覆蓋
 
@@ -1121,9 +1138,14 @@ if _module == M_IMPORT:
 
     # ==========================================
 
-    with st.expander("檢視／編輯居服員、案家與服務任務", expanded=False):
+    with st.expander("檢視／編輯居服員、案家與服務任務（進階）" if _advanced else "檢視居服員、案家與服務任務", expanded=False):
+        if not _advanced:
+            st.caption('這裡只供檢視。要修改資料請改 Excel 後重新上傳——在系統裡改不會寫回 Excel，容易兩邊對不上。')
 
         def render_editable_sheet(session_key: str):
+            if not _advanced:
+                show_table(st.session_state[session_key], hide_index=True, width='stretch')
+                return
 
             with st.expander("➕ 新增欄位"):
 
@@ -1199,19 +1221,19 @@ if _module == M_IMPORT:
 
         with tab_cg:
 
-            st.caption("可直接編輯儲存格、新增／刪除列（勾選列號後按 Delete），或透過「新增欄位」新增自訂欄位。")
+            if _advanced: st.caption("可直接編輯儲存格、新增／刪除列（勾選列號後按 Delete），或透過「新增欄位」新增自訂欄位。")
 
             render_editable_sheet("edit_cg")
 
         with tab_cl:
 
-            st.caption("可直接編輯儲存格、新增／刪除列，或透過「新增欄位」新增自訂欄位。")
+            if _advanced: st.caption("可直接編輯儲存格、新增／刪除列，或透過「新增欄位」新增自訂欄位。")
 
             render_editable_sheet("edit_cl")
 
         with tab_tasks:
 
-            st.caption("可直接編輯儲存格、新增／刪除列，或透過「新增欄位」新增自訂欄位。")
+            if _advanced: st.caption("可直接編輯儲存格、新增／刪除列，或透過「新增欄位」新增自訂欄位。")
 
             render_editable_sheet("edit_tasks")
 
@@ -1357,11 +1379,12 @@ if _module == M_SCHEDULE:
             st.caption('先依歷史首選排固定週型，再延展至期間結束。隔週與計畫異動分別建立週型；請假、資格日期、月加班及公車／捷運按實際日期核對。')
             if traffic_wake.is_ready(_osrm_host):
                 st.session_state.pop('_schedule_osrm_error', None)     # 主機已醒，舊的失敗說明不再顯示
-            traffic_wake.panel(_osrm_host, 'schedule')
+            traffic_wake.panel(_osrm_host, 'schedule', light=not _advanced)
             if st.session_state.get('_schedule_osrm_error'):
                 st.error('⚠️ ' + st.session_state['_schedule_osrm_error'])
-                with st.expander('技術細節（給工程師）'):
-                    st.code(st.session_state.get('_schedule_osrm_detail', ''))
+                if _advanced:
+                    with st.expander('技術細節（給工程師）'):
+                        st.code(st.session_state.get('_schedule_osrm_detail', ''))
             if st.button('開始排班 · 全期間', type='primary', width='stretch', key='run_full_period'):
                 st.session_state.pop('_schedule_osrm_error', None)
                 st.session_state.pop('_schedule_osrm_detail', None)
@@ -2011,7 +2034,7 @@ if "last_result" in st.session_state:
                 for _col in ('案家ID', '重疊案家ID'):
                     _ov[_col] = _ov[_col].map(client_label)
                 show_table(_ov, hide_index=True, width='stretch')
-                st.caption('處理方式：到「02 智慧排班作業」的人工調整把其中一筆改派給其他人。')
+                st.caption('處理方式：到「02 智慧排班作業」的日曆班表點其中一筆，改派給其他人。')
             if _issue_transitions is not None and not _issue_transitions.empty:
                 subhead(f'轉場不足／交通待確認（已派）· {len(_issue_transitions)} 筆')
                 _tv = _issue_transitions.copy()
@@ -2030,7 +2053,7 @@ if "last_result" in st.session_state:
                 download_button_quiet('下載衝突與異常清單 CSV', export_frame(_issue_unassigned).to_csv(index=False).encode('utf-8-sig'),
                                       '衝突與異常清單.csv', 'text/csv', key='download_issue_list')
                 st.caption('替代方案：切換到「未派與替代方案」，系統會逐案試算前後挪時間、換人、拆成兩段等方案。')
-            if diagnostics:
+            if diagnostics and _advanced:
                 with st.expander('候選配對及未派單原因（排班引擎原始診斷）'):
                     show_table(pd.DataFrame(diagnostics),hide_index=True,width='stretch')
             if (_issue_overlaps is None or _issue_overlaps.empty) and (_issue_transitions is None or _issue_transitions.empty) and _issue_unassigned.empty:
@@ -2234,7 +2257,8 @@ if "last_result" in st.session_state:
                         _frame['歷史備援'] = ''
                     _frame['歷史備援'] = _frame['歷史備援'].astype(object)
                     _frame.loc[_mask, '歷史備援'] = '、'.join(_team_others)
-                res.setdefault('whole_client_log', []).extend(change_log_rows(
+                _logged_at = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')
+                res.setdefault('whole_client_log', []).extend(dict(_r, 時間=_logged_at) for _r in change_log_rows(
                     _case, _edits_used, _base_rows, main, _team_others, _reason))
                 st.session_state.setdefault('pending_edits', {}).pop(str(_case), None)
                 for _stale in ('_advice_cache', '_plan_cache', '_screen_cache', '_trial_cache', '_team_cache', 'route_signature', 'google_verified_signature'):
@@ -2388,7 +2412,7 @@ if "last_result" in st.session_state:
                                               type='primary' if _i == 0 else 'secondary')
                         else:
                             st.warning('在目前的人力與規則下，系統試過「前後挪時間、換天、換人、拆成兩段」都沒有辦法讓它排進去。'
-                                       '可以：① 增加居服員（例如補機動人員）② 到「02 智慧排班作業」的人工調整，把衝突的既有班改給別人 ③ 與案家協調服務時間。')
+                                       '可以：① 增加居服員（例如補機動人員）② 到「02 智慧排班作業」的日曆班表點衝突的既有班，改給別人 ③ 與案家協調服務時間。')
                     _lines = edits_summary(_edits, _plabel)
                     if _lines:
                         st.markdown('**目前已選的調整（還沒寫入班表）**')
@@ -2456,29 +2480,30 @@ if "last_result" in st.session_state:
                                       args=(_case, {'type': 'split', 'pid': _edit_pid, 'first': int(_first), 'gap': _gap,
                                                     'first_worker': _first_pick, 'second_worker': _second}))
 
-                with st.expander('🔧 進階：自己挑人、逐位檢查、分給兩位以上（一般不需要打開）', expanded=False):
-                    st.markdown('##### 進階 A．誰符合？逐位檢查資格')
+                with st.expander('🔧 自己挑人（看誰符合 → 試算 → 套用，可分給兩位以上）', expanded=False):
+                    st.markdown('##### 步驟 1．誰符合資格？')
                     _ok_total = int((_screen['結論'] == '✅ 資格全符合').sum())
                     st.caption(f"{len(_screen)} 位居服員中，{_ok_total} 位「資格」全部符合（證照、可排班星期、可服務時段、性別、體力、請假）。"
                                "接著要看與其他案家的時間衝突、休息、每日工時與月加班，請按下方「完整試算」。")
-                    _table_cols = ['居服員ID', '結論', '資格可排', '證照／訓練', '排班日', '可服務時段', '性別／體力／環境', '請假／到期',
-                                   '本月已排(時)', '加上此案(時)', '住家距離(公里)', '與此案關係']
-                    show_table(_screen[_table_cols].rename(columns={'居服員ID': '居服員'}), hide_index=True, width='stretch',
-                               column_config={
-                                   '證照／訓練': st.column_config.TextColumn(width='medium'),
-                                   '排班日': st.column_config.TextColumn(width='medium'),
-                                   '可服務時段': st.column_config.TextColumn(width='medium'),
-                                   '本月已排(時)': st.column_config.NumberColumn(help='目前已排給這位居服員的服務時數（不含轉場）'),
-                                   '加上此案(時)': st.column_config.NumberColumn(help='接手整案後的服務時數；是否超過加班上限，請看下方完整試算'),
-                                   '住家距離(公里)': st.column_config.NumberColumn(help='居服員住家到案家的直線距離'),
-                               })
-                    _blocked = _screen[_screen['阻擋原因'].ne('—')]
-                    if not _blocked.empty:
-                        with st.expander(f'查看 {len(_blocked)} 位居服員「不符合」的具體原因與次數'):
-                            show_table(_blocked[['居服員ID', '結論', '資格可排', '阻擋原因']].rename(columns={'居服員ID': '居服員'}),
-                                       hide_index=True, width='stretch')
+                    if st.checkbox('顯示每位居服員的資格明細', key=f'pending_screen_detail_{_case}'):
+                        _table_cols = ['居服員ID', '結論', '資格可排', '證照／訓練', '排班日', '可服務時段', '性別／體力／環境', '請假／到期',
+                                       '本月已排(時)', '加上此案(時)', '住家距離(公里)', '與此案關係']
+                        show_table(_screen[_table_cols].rename(columns={'居服員ID': '居服員'}), hide_index=True, width='stretch',
+                                   column_config={
+                                       '證照／訓練': st.column_config.TextColumn(width='medium'),
+                                       '排班日': st.column_config.TextColumn(width='medium'),
+                                       '可服務時段': st.column_config.TextColumn(width='medium'),
+                                       '本月已排(時)': st.column_config.NumberColumn(help='目前已排給這位居服員的服務時數（不含轉場）'),
+                                       '加上此案(時)': st.column_config.NumberColumn(help='接手整案後的服務時數；是否超過加班上限，請看下方完整試算'),
+                                       '住家距離(公里)': st.column_config.NumberColumn(help='居服員住家到案家的直線距離'),
+                                   })
+                        _blocked = _screen[_screen['阻擋原因'].ne('—')]
+                        if not _blocked.empty:
+                            with st.expander(f'查看 {len(_blocked)} 位居服員「不符合」的具體原因與次數'):
+                                show_table(_blocked[['居服員ID', '結論', '資格可排', '阻擋原因']].rename(columns={'居服員ID': '居服員'}),
+                                           hide_index=True, width='stretch')
 
-                    st.markdown('##### 進階 B．完整試算：加入現有班表後真的排得進嗎？')
+                    st.markdown('##### 步驟 2．試算：加進現有班表後排得進嗎？')
                     _eligible = [str(r['居服員ID']) for _, r in _screen.iterrows() if r['_ok'] > 0]
                     _cap = max(1, len(_eligible))
                     if _cap > 1:
@@ -2535,11 +2560,11 @@ if "last_result" in st.session_state:
                                            + (f" 改由多位分工，系統組合出 {_team_plan['accepted']}/{_team_plan['total']} 次（見下方④）。" if _team_plan['accepted'] > int(_best['可安排']) else ''))
                             else:
                                 st.error('試算的人選都排不進；請看「主要原因」，或回到上方「③ 處理」用建議方案（前後挪時間、換人、拆成兩段）。')
-                    st.caption('狀態說明：✅ 全部可排　⚠️ 只能排其中幾次　❌ 資格符合但時間排不進　🔘 資格符合、尚未試算　⛔ 資格不符（證照、性別、排班日等）。下方「進階 C」的選單用同一套狀態。')
+                    st.caption('狀態說明：✅ 全部可排　⚠️ 只能排其中幾次　❌ 資格符合但時間排不進　🔘 資格符合、尚未試算　⛔ 資格不符（證照、性別、排班日等）。下方「步驟 3」的選單用同一套狀態。')
                     show_table(_status[['居服員ID', '狀態', '資格', '月加班(時)', '主要原因']].rename(columns={'居服員ID': '居服員', '資格': '資格可排'}),
                                hide_index=True, width='stretch', column_config={'主要原因': st.column_config.TextColumn(width='large')})
 
-                    st.markdown('##### 進階 C．自己選人（可分給兩位以上），預覽並套用')
+                    st.markdown('##### 步驟 3．選人、預覽並套用')
                     _order = [str(x) for x in _status['居服員ID']] + [p for p in _case_people if p not in set(_status['居服員ID'])]
 
                     def _worker_label(v):
@@ -2637,7 +2662,7 @@ if "last_result" in st.session_state:
                                        hide_index=True, width='stretch')
                             with st.expander('逐筆明細'):
                                 show_table(_preview['failed'], hide_index=True, width='stretch')
-                            st.info('建議方案請看上方「③ 處理」區；這裡是進階手動模式：可改選其他主責、在上表改開始時間，或到「02 智慧排班作業」的人工調整，把衝突的既有班改給別人。')
+                            st.info('建議方案請看上方「③ 處理」區；這裡是進階手動模式：可改選其他主責、在上表改開始時間，或到「02 智慧排班作業」的日曆班表點衝突的既有班，改給別人。')
                         _apply_label = ('套用整案排班' if _preview['failed'].empty else
                                         f"套用可排的 {len(_preview['accepted'])} 次（其餘 {len(_preview['failed'])} 次仍待處理）")
                         if st.button(_apply_label, type='primary', key='apply_pending_client',
@@ -2742,28 +2767,29 @@ if "last_result" in st.session_state:
         if st.session_state.get('cf_calendar_mode') == '個人週班' and st.session_state.get('cf_person'):
             _render_worker_panel(str(st.session_state['cf_person']))
 
-        # 居督人工覆寫（Supervisor Override）：與月曆「一鍵調班」共用同一套覆寫介面與稽覈日誌。
-        subhead('人工調整')
-        st.caption(
-            "當 AI 建議排單不符合實際場域狀況時（例如居服員臨時請假、案家臨時改期），"
-            "居督可搜尋／選擇任務後於彈出視窗手動重新指定居服員（與日曆班表「一鍵調班」"
-            "共用同一套覆寫互動介面）；每一筆變更皆會記錄原因並寫入稽覈日誌，可在「04 排班結果與覆核」查看。"
-        )
-        OVERRIDE_TRAVEL_ALERT_THRESHOLD = 3
-        travel_reason_count = (
-            override_log_df["變更原因"].map(reason_category).eq("交通／時間銜接不足").sum() if not override_log_df.empty else 0
-        )
-        if travel_reason_count >= OVERRIDE_TRAVEL_ALERT_THRESHOLD:
-            st.warning(
-                f"📈 稽覈日誌累計已有 {travel_reason_count} 筆修改原因為「交通／時間銜接不足」，"
-                "建議到「01 資料匯入與排班設定」提高『車程扣分權重』，讓 AI 派單更優先考量就近指派。"
+        if _advanced:
+            # 居督人工覆寫（Supervisor Override）：與月曆「一鍵調班」共用同一套覆寫介面與稽覈日誌。
+            subhead('人工調整')
+            st.caption(
+                "當 AI 建議排單不符合實際場域狀況時（例如居服員臨時請假、案家臨時改期），"
+                "居督可搜尋／選擇任務後於彈出視窗手動重新指定居服員（與日曆班表「一鍵調班」"
+                "共用同一套覆寫互動介面）；每一筆變更皆會記錄原因並寫入稽覈日誌，可在「04 排班結果與覆核」查看。"
             )
-        st.caption('代班僅套用本次服務；固定人選請假結束後仍由原人選服務。')
-        st.caption('🧭 ' + SUBSTITUTE_RULE_TEXT)
-        render_task_override_picker(
-            df_tasks, df_result, res.get("df_cg", pd.DataFrame()), overrides,
-            on_reassign=_quick_reassign, on_clear_override=_clear_override, on_list_candidates=_list_candidates,
-        )
+            OVERRIDE_TRAVEL_ALERT_THRESHOLD = 3
+            travel_reason_count = (
+                override_log_df["變更原因"].map(reason_category).eq("交通／時間銜接不足").sum() if not override_log_df.empty else 0
+            )
+            if travel_reason_count >= OVERRIDE_TRAVEL_ALERT_THRESHOLD:
+                st.warning(
+                    f"📈 稽覈日誌累計已有 {travel_reason_count} 筆修改原因為「交通／時間銜接不足」，"
+                    "建議到「01 資料匯入與排班設定」提高『車程扣分權重』，讓 AI 派單更優先考量就近指派。"
+                )
+            st.caption('代班僅套用本次服務；固定人選請假結束後仍由原人選服務。')
+            st.caption('🧭 ' + SUBSTITUTE_RULE_TEXT)
+            render_task_override_picker(
+                df_tasks, df_result, res.get("df_cg", pd.DataFrame()), overrides,
+                on_reassign=_quick_reassign, on_clear_override=_clear_override, on_list_candidates=_list_candidates,
+            )
         for _notice in st.session_state.pop('consecutive_days_notices', []):
             st.warning('⚠️ ' + _notice)
 
@@ -2786,7 +2812,8 @@ if "last_result" in st.session_state:
             if _prop_details:
                 with st.expander("查看後續週期調整明細", expanded=False):
                     show_table(pd.DataFrame(_prop_details), width="stretch", hide_index=True)
-        subhead('個案與居服員媒合、候選人推薦')
+        if _advanced:
+            subhead('個案與居服員媒合、候選人推薦')
 
     # ---------- 05 人力與效益分析（主管） ----------
     if _module == M_ANALYTICS:
@@ -2851,7 +2878,7 @@ if "last_result" in st.session_state:
                 download_button_quiet('下載逐段交通明細 CSV', export_frame(df_route_result).to_csv(index=False).encode('utf-8-sig'), '逐段交通明細.csv', 'text/csv')
         module_nav_buttons(M_ANALYTICS)
 
-    if _module != M_SCHEDULE:
+    if _module != M_SCHEDULE or not _advanced:
         pass
     elif _effective_for_kpi.empty:
 
@@ -3157,7 +3184,7 @@ if "last_result" in st.session_state:
                     ranked = rank_candidates_by_availability(tid, ids, tasks_now, effective_now, res['df_cg'], config,
                                                              date_column='日期', df_cl=res.get('df_cl'))
                     options = [{'cg': str(r['cg_id']), 'reason': r.get('rank_reason', '')} for r in ranked if r.get('available')][:top]
-                    error = '' if options else '找不到可派人選，請到「02 智慧排班作業」的人工調整處理'
+                    error = '' if options else '找不到可派人選，請到「02 智慧排班作業」的日曆班表點該筆服務處理'
                 except Exception as exc:
                     _log_error('月曆待安排候選計算', exc)
                     options, error = [], f'候選計算失敗：{exc}'
@@ -3553,6 +3580,9 @@ if "last_result" in st.session_state:
                 st.rerun()
 
         def _render_plan_change_log():
+            if res.get('plan_version_log') and not _advanced:
+                st.caption(f"🧾 本次已套用 {len(res['plan_version_log'])} 筆週計畫異動；紀錄請到「04 排班結果與覆核 › 異動紀錄」查看。")
+                return
             if res.get('plan_version_log'):
                 st.markdown('##### 本次已套用的週計畫異動')
                 show_table(pd.DataFrame(res['plan_version_log']), hide_index=True, width='stretch')
@@ -4018,7 +4048,7 @@ if "last_result" in st.session_state:
                         f"各時段可排人數：{'、'.join(str(n) for n in found['per_slot'])} 位；預計第一順位：{tops}。")
             return ''
 
-        if _demo_kind:
+        if _demo_kind and _advanced:
             _cols = st.columns([1.2] * len(_demo_buttons) + [3.2 - 1.2 * (len(_demo_buttons) - 1)], vertical_alignment='center')
             _cols[-1].caption('不知道要測哪一筆？按左邊按鈕，系統會從目前班表找一個「一定找得到代班人選」的情境並幫你填好欄位；'
                               '會優先挑第一順位是「從前一案過來」的人，方便確認交通看的是前一案位置。')
@@ -5089,8 +5119,11 @@ if "last_result" in st.session_state:
                 st.markdown('**資格追蹤清單**（補訓期限、陪同交接進度）')
                 show_table(pd.DataFrame(st.session_state['qualification_followups']), hide_index=True, width='stretch')
 
-        if st.session_state.get("dynamic_adjustment_log"):
-            with st.expander("🧾 本次臨時異動紀錄", expanded=False):
+        if st.session_state.get("dynamic_adjustment_log") and not _advanced:
+            st.caption(f"🧾 本次已有 {len(st.session_state['dynamic_adjustment_log'])} 筆臨時異動；"
+                       "紀錄請到「04 排班結果與覆核 › 異動紀錄」查看與下載。")
+        if st.session_state.get("dynamic_adjustment_log") and _advanced:
+            with st.expander("🧾 本次臨時異動紀錄（原始欄位）", expanded=False):
                 _dynamic_log_df = pd.DataFrame(st.session_state["dynamic_adjustment_log"])
                 show_table(_dynamic_log_df, width="stretch", hide_index=True)
                 st.caption(
@@ -5541,7 +5574,8 @@ if "last_result" in st.session_state:
                         _checkin_runner.stop_tunnel()
                         st.rerun()
                 else:
-                    st.warning('⚠️ 這個網址只有連同一個 Wi-Fi 的手機打得開。居服員在外面跑服務要打卡，請按下面按鈕產生外部網址。')
+                    st.warning('⚠️ 這個網址是 http：只有連同一個 Wi-Fi 的手機打得開，而且**手機不允許定位**（打卡會記成「無定位」）。'
+                               '要定位打卡、或居服員在外面跑服務，請按下面按鈕產生 https 外部網址。')
                     if st.button('🌐 產生外部網址（居服員在外面也能打卡）', key='checkin_tunnel_start', type='primary', width='stretch'):
                         with st.spinner('啟動中…第一次會先下載 Cloudflare 官方免費工具（約 50MB），請稍候 1～2 分鐘'):
                             try:
@@ -5556,7 +5590,8 @@ if "last_result" in st.session_state:
                     st.caption('會用 Cloudflare 的免費通道，產生一個 https 網址連到這台電腦；不用設防火牆，飯店、家裡的網路也能用。')
                 if _running:
                     st.caption(f'想先自己試：在這台電腦打開 [http://localhost:{_checkin_runner.PORT}](http://localhost:{_checkin_runner.PORT})，'
-                               '按 F12 再按 Ctrl+Shift+M 切成手機畫面。')
+                               '按 F12 再按 Ctrl+Shift+M 切成手機畫面。電腦瀏覽器第一次打卡會問「要允許位置嗎」，要按允許；'
+                               'Windows 還要在「設定 → 隱私權與安全性 → 位置」開啟定位服務。')
                 if _kind == '辦公室網路':
                     with st.expander('只在辦公室試用（手機和電腦連同一個 Wi-Fi）'):
                         if len(_nics) > 1:
@@ -5783,13 +5818,41 @@ if "last_result" in st.session_state:
 
         _attendance_view()
 
-        subhead('人工覆寫紀錄')
-        _session_overrides = [{'任務ID': k, '目前居服員': caregiver_label(v.get('cg_id')) if v.get('cg_id') else '待安排', '原因': v.get('reason', '')}
-                              for k, v in overrides.items()]
-        st.caption(f"本次作業共有 {len(_session_overrides)} 筆服務經人工覆寫或標記待安排；"
-                   f"稽覈日誌累計 {len(override_log_df)} 筆。")
-        _log_tabs = st.tabs(['修改原因統計', '本次人工覆寫', '居督覆寫稽覈日誌', '臨時異動紀錄', '整案調整紀錄', '資格追蹤'])
-        with _log_tabs[0]:
+        subhead('異動紀錄')
+
+        @st.fragment
+        def _change_log_view():
+            import change_log as _chlog
+            _audit_df = None
+            if _is_manager:
+                try:
+                    _audit_df = audit_log.as_table(300)
+                except Exception as exc:
+                    _log_error('讀取稽核紀錄', exc)
+            _sources = (override_log_df, st.session_state.get('dynamic_adjustment_log') or [], res.get('whole_client_log') or [],
+                        res.get('plan_version_log') or [], st.session_state.get('qualification_followups') or [], _audit_df)
+            _all = _chlog.build(*_sources, client_label=client_label, caregiver_label=caregiver_label)
+            if _all.empty:
+                st.info('目前沒有任何異動。改派、臨時異動、整案調整、週計畫異動、資格追蹤都會記在這裡。')
+                return
+            _f1, _f2 = st.columns([3, 1.3])
+            _picked = _f1.multiselect('類型', _chlog.kinds(_all), default=_chlog.default_kinds(_all), key='change_log_kinds',
+                                      placeholder='選擇要看的類型')
+            _q = _f2.text_input('搜尋', key='change_log_q', placeholder='案家、任務、居服員…')
+            _view = _all[_all['類型'].isin(_picked)]
+            if _q.strip():
+                _view = _view[_view.apply(lambda r: _q.strip() in ' '.join(map(str, r.values)), axis=1)]
+            st.caption(f'共 {len(_all)} 筆，目前顯示 {len(_view)} 筆（新的在上）。「改派」含歷次作業累計的紀錄，其他類型是這次作業的紀錄。'
+                       + ('「系統：」開頭的是登入、匯出等稽核紀錄，要看請在類型裡勾選。' if _audit_df is not None else ''))
+            show_table(_view, hide_index=True, width='stretch', column_config={'內容': st.column_config.TextColumn(width='large')})
+            _out = _view if _export_names else _chlog.build(*_sources).loc[_view.index]
+            download_button_quiet('⬇️ 下載異動紀錄 CSV', _out.to_csv(index=False).encode('utf-8-sig'), '異動紀錄.csv', 'text/csv',
+                                  key='change_log_download')
+            if res.get('whole_client_log'):
+                st.caption('整案調整與週計畫異動只存在這次作業中；要長期保留，請照紀錄修改 Excel，或到上方「更新機構 Excel」下載新版。')
+
+        _change_log_view()
+        with st.expander('修改原因統計（改派時選的原因）'):
             _reasons = override_log_df['變更原因'] if (not override_log_df.empty and '變更原因' in override_log_df) else pd.Series(dtype=object)
             if _reasons.empty:
                 st.info('尚無修改紀錄。修改班表時選擇的原因會累計在這裡。')
@@ -5804,39 +5867,6 @@ if "last_result" in st.session_state:
                     show_table(_stats, hide_index=True, width='stretch')
                 with _s2:
                     st.bar_chart(_stats.set_index('原因類別')[['次數']], height=260)
-        _log_tabs = _log_tabs[1:]
-        with _log_tabs[0]:
-            if _session_overrides:
-                show_table(pd.DataFrame(_session_overrides), width='stretch', hide_index=True)
-            else:
-                st.info('本次作業尚無人工覆寫。')
-        with _log_tabs[1]:
-            if override_log_df.empty:
-                st.info("尚無居督覆寫紀錄。")
-            else:
-                show_table(override_log_df, width="stretch", hide_index=True)
-                download_button_quiet('下載稽覈日誌 CSV', export_frame(override_log_df).to_csv(index=False).encode('utf-8-sig'),
-                                      'supervisor_override_log.csv', 'text/csv', key='download_override_log')
-        with _log_tabs[2]:
-            _dyn_log = st.session_state.get('dynamic_adjustment_log') or []
-            if _dyn_log:
-                show_table(pd.DataFrame(_dyn_log), width='stretch', hide_index=True)
-            else:
-                st.info('本次作業尚無臨時異動紀錄（請假、改期、延遲、臨時新增）。')
-        with _log_tabs[3]:
-            _whole_log = res.get('whole_client_log') or []
-            if _whole_log:
-                show_table(pd.DataFrame(_whole_log), width='stretch', hide_index=True)
-                st.caption('原始 Excel 不會被自動改寫；若這些調整要長期保留，請照這份紀錄修改 Excel 後重新匯入。')
-            else:
-                st.info('本次作業尚無整案調整。')
-        with _log_tabs[4]:
-            _follow_rows = st.session_state.get('qualification_followups') or []
-            if _follow_rows:
-                show_table(pd.DataFrame(_follow_rows), width='stretch', hide_index=True)
-                st.caption('補訓期限到期前請確認原居服員已完成訓練並更新員工資料「取得資格」；取得資格後才可改回主責，未完成者維持由有訓練的居服員服務。')
-            else:
-                st.info('目前沒有資格追蹤項目（案家新增失智、足部照護等資格重新檢核會記在這裡）。')
         module_nav_buttons(M_REVIEW)
 
     # 自動存檔：作業內容有變動（排班、改派、插單、整案調整、改期…）就寫入本機資料庫。

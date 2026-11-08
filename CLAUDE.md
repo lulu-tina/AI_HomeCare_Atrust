@@ -24,6 +24,7 @@ CareFlow：居家長照（居服）機構的排班系統。讀取機構 Excel（
 | `worker_panel.py` | 以居服員為主軸的時段總覽（03「個人週班」下方） |
 | `billing.py` | CSMS 申報格式匯出＋自付額試算（額度、部分負擔比例、喘息／自費）；欄位對照集中在 `CLAIM_COLUMNS` |
 | `undo_stack.py` | 「復原上一步」：最多 10 步，快照 session 狀態與排班結果 |
+| `change_log.py` | 04「異動紀錄」：把改派、臨時異動、整案調整、週計畫異動、資格追蹤、稽核合成一張表，依類型篩選 |
 | `error_log.py` | `log_error(where, exc)`：寫入 `output_results/logs/careflow_errors.log` 並回傳錯誤代碼，側欄可看本次錯誤 |
 | `auth.py` | 內建帳號（主管／居督）、PBKDF2 密碼、登入失敗鎖定；`CAREFLOW_AUTH=off` 可關閉 |
 | `checkin/`（store、server、runner） | 居服員打卡：員編登入＋綁定手機、定位打卡、04 看板、QR、Cloudflare 臨時外網網址、示範工具 |
@@ -67,6 +68,7 @@ git：目前分支 main；只在使用者要求時才 commit。
 - 交通時間一律經過 `calc_travel_minutes`；停車、門禁等到達時間由 `buffer_mins` 涵蓋。
 - 硬性條件集中在 `_check_hard_constraints`；新增的不可派原因也要加到 `eligibility.CATEGORY_RULES` 與 `monthly_scheduler.failure_kind`。
 - 系統只產生「建議」；已確認、待回覆、已接單、已通知案家的服務不可被自動換人。
+- 介面分「居督模式」（預設）與「🛠️ 進階模式」（側欄開關 `ui_advanced`，變數 `_advanced`）。給工程師／主管的設定、明細、示範按鈕，一律只在進階模式顯示。
 - 會改排班狀態的新操作，要讓 `undo_stack.STATE_KEYS`／`RES_KEYS` 涵蓋到，才能復原。
 - 不要用裸的 `except Exception: pass`；吞掉錯誤時至少呼叫 `error_log.log_error`。
 - 多人同時使用：每位使用者的狀態放 `st.session_state` 或 ContextVar，不要用模組層級可變全域變數。

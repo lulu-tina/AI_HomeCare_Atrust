@@ -88,8 +88,19 @@ def friendly_error(message):
             '如果等超過 5 分鐘仍叫不醒，請通知工程師檢查 Render 服務是否暫停。')
 
 
-def panel(host, key, compact=False):
-    """喚醒面板：狀態燈＋按鈕；喚醒中每 3 秒自動更新，不會卡住其他操作。"""
+def light_label(state):
+    """居督模式用的一行狀態燈（不顯示技術訊息）。"""
+    return {'local': '🟢 交通主機正常',
+            'ready': '🟢 交通主機正常',
+            'stale': '🟢 交通主機正常',
+            'idle': '🟡 交通主機準備中（會自動啟動）',
+            'waking': '🟡 交通主機啟動中，約 1～3 分鐘',
+            'failed': '🔴 交通主機連不上，請通知主管或資訊人員'}.get(state, '🟡 交通主機準備中')
+
+
+def panel(host, key, compact=False, light=False):
+    """喚醒面板：狀態燈＋按鈕；喚醒中每 3 秒自動更新，不會卡住其他操作。
+    light=True：居督模式，只顯示一行狀態燈；連不上時才多一顆「再試一次」。"""
     waking = status(host)['status'] == 'waking'
 
     def body():
@@ -97,6 +108,12 @@ def panel(host, key, compact=False):
         state = info['status']
         if waking and state != 'waking':
             st.rerun()          # 喚醒結束：整頁更新一次，停止每 3 秒的自動刷新
+        if light:
+            st.caption(light_label(state))
+            if state == 'failed' and st.button('🔄 再試一次', key=f'osrm_wake_{key}', width='stretch'):
+                start(host)
+                st.rerun()
+            return
         if state == 'local':
             st.caption('🛵 交通主機：本機路網，不需喚醒')
             return

@@ -38,6 +38,9 @@ def test_swallowed_error_is_logged_and_shown_in_sidebar(tmp_path, monkeypatch):
     assert any(e['位置'] == '讀取自動存檔資訊' and '存檔資料庫壞了' in e['錯誤'] for e in errors)
     assert '存檔資料庫壞了' in (tmp_path / 'logs' / 'careflow_errors.log').read_text(encoding='utf-8')
     app.run()                                                              # 下一次畫面重跑，側邊欄就看得到
+    assert any('個系統錯誤' in c.value for c in app.sidebar.caption)         # 居督模式：一行提示
+    assert not any('本次作業有' in e.label for e in app.sidebar.expander)
+    app.sidebar.toggle(key='ui_advanced').set_value(True).run()            # 進階模式：錯誤代碼清單
     assert any('本次作業有' in e.label for e in app.sidebar.expander)
     for handler in list(error_log._logger.handlers):
         error_log._logger.removeHandler(handler)
